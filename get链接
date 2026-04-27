@@ -1,0 +1,99 @@
+from DrissionPage import ChromiumPage
+from DataRecorder import Recorder
+import pandas as pd
+from tqdm import tqdm
+import time
+import random
+import re
+import openpyxl
+import os
+import math
+
+#登录小红书
+def sign_in():
+    sign_in_page = ChromiumPage()
+    sign_in_page.get('https://www.xiaohongshu.com')
+    #第一次运行需要扫码登录
+
+#登录
+#sign_in()
+
+#打开作者主页
+def open(url):
+    global page, user_name
+    page = ChromiumPage()
+    page.get(f'{url}')
+    # 页面最大化
+    page.set.window.max()
+
+    # 定位作者信息
+    user = page.ele('.info')
+    # 作者名字
+    user_name = user.ele('.user-name', timeout=0).text
+
+# 抓包
+def get_info():
+    # 定位包含笔记信息的sections
+    container = page.ele('.feeds-container')
+    sections = container.eles('.note-item')
+
+    # 遍历所有笔记项
+    for section in sections:
+        # 笔记类型
+        note_type = "视频" if section.ele('.play-icon', timeout=0) else "图文"
+        # 文章链接
+        #note_link = section.ele('tag:a', timeout=0).link
+        note_link = section.ele('.cover mask ld', timeout=10).link
+        # 标题
+        title = section.ele('.title', timeout=0).text
+        # 作者
+        author_wrapper = section.ele('.author-wrapper')
+        # 点赞
+        like = author_wrapper.ele('.count', timeout=0).text
+        # 写入缓存
+        note = {'作者': author_wrapper, '笔记类型': note_type, '标题': title, '点赞数': like, '笔记链接': note_link}
+        notes.append(note)
+
+#向下滑动刷新数据
+import time
+import random
+def page_scroll_down():
+    print(f"********下滑页面********")
+    page.scroll.to_bottom()
+    # 生成一个1-2秒随机时间
+    random_time = random.uniform(1, 2)
+    # 暂停
+    time.sleep(random_time)
+
+#循环调用采集函数和翻页函数
+# 设置向下翻页爬取次数
+def crawler(times):
+    global notes
+    # notes列表存放当前页面的笔记
+    notes = []
+    for i in tqdm(range(1, times + 1)):
+        get_info()
+        page_scroll_down()
+# 设置向下翻页爬取次数
+note_num = 1114 #note_num是笔记数量
+# times是计算得到的翻页次数，笔记数量除以20，调整系数，再向上取整
+times = math.ceil(note_num / 20 * 1.1)
+print(f"需要执行翻页次数为：{times}")
+
+#执行
+open('')
+crawler(times)
+
+#保存数据
+from DataRecorder import Recorder
+#设置要保存的文件名file_path
+# 获取当前时间
+current_time = time.localtime()
+# 格式化当前时间
+formatted_time = time.strftime("%Y-%m-%d %H%M%S", current_time)
+# 初始化文件
+init_file_path = f'D:\\研究生\\论文\\女性广告\\小红书品牌excel\\小红书作者主页所有笔记-{formatted_time}.xlsx'
+r = Recorder(path=init_file_path, cache_size=20)
+#记录数据到缓存
+r.add_data(notes)
+
