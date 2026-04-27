@@ -1,0 +1,702 @@
+from DrissionPage import ChromiumPage
+from bs4 import BeautifulSoup
+from PIL import Image
+from tqdm import tqdm
+import pandas as pd
+import requests
+import time
+import random
+import os
+import io
+import base64
+from urllib.parse import urljoin
+import re
+
+# 百度人像检测配置
+BAIDU_API_KEY = 'hjtTvdtPK1WWjqKxpJsQGxUP'
+BAIDU_SECRET_KEY = 'nAvlXy2p99yuepx83ZujK8xsevUUXr3w'
+BAIDU_OAUTH_URL = 'https://aip.baidubce.com/oauth/2.0/token'
+BAIDU_FACE_DETECT_URL = 'https://aip.baidubce.com/rest/2.0/face/v3/detect'
+BAIDU_ACCESS_TOKEN = None
+BAIDU_TOKEN_EXPIRES_AT = 0
+MAX_BAIDU_IMAGE_SIZE = 2 * 1024 * 1024
+MAX_BAIDU_IMAGE_SIDE = 1600
+FACE_PROB_THRESHOLD = 0.4
+GENDER_PROB_THRESHOLD = 0.4
+MIN_FACE_RATIO = 0.01
+
+# 访问频率控制
+NOTE_PAGE_SLEEP_MIN = 3.0   # 打开笔记页面后的最小随机睡眠时间（秒）
+NOTE_PAGE_SLEEP_MAX = 5.0
+IMAGE_DOWNLOAD_SLEEP_MIN = 1.0 # 下载每张图片后的最小随机睡眠时间（秒）
+IMAGE_DOWNLOAD_SLEEP_MAX = 2.0
+BATCH_PAUSE_EVERY = 20      # 每处理多少条笔记后休眠一次
+BATCH_PAUSE_MIN = 40.0
+BATCH_PAUSE_MAX = 80.0
+
+# 输出路径
+BASE_OUTPUT_ROOT = r'D:\研究生\论文\女性广告\PythonProject1\小红书女性人像筛选结果'  # 请根据需要修改
+os.makedirs(BASE_OUTPUT_ROOT, exist_ok=True)
+
+
+def sign_in():
+    """如果当前浏览器未登录小红书，请调用此函数扫码登录。"""
+    page = ChromiumPage()
+    page.get('https://www.xiaohongshu.com')
+    print('请扫码登录，登录完成后程序会继续运行。')
+    time.sleep(20)
+    return page
+
+
+def sanitize_filename(filename: str) -> str:
+    return ''.join(c for c in filename if c not in '\\/:*?"<>|').strip()
+
+
+def read_urls_from_txt(file_path):
+    with open(file_path, 'r', encoding='utf-8') as f:
+        return [line.strip() for line in f if line.strip()]
+
+
+def get_note_info(note_page, note_url):
+    """
+    从笔记页面提取作者、标题、点赞/收藏/评论数、笔记类型。
+    返回字典，若提取失败返回None。
+    """
+    try:
+        # 等待页面加载
+        time.sleep(random.uniform(NOTE_PAGE_SLEEP_MIN, NOTE_PAGE_SLEEP_MAX))
+        html = note_page.html
+        soup = BeautifulSoup(html, 'html.parser')
+
+        # 提取作者名
+        author = ''
+        try:
+            author_ele = note_page.ele('.author-container .info .username', timeout=5)
+            author = author_ele.text if author_ele else ''
+        except:
+            pass
+
+        # 提取标题
+        title = ''
+        try:
+            title_ele = note_page.ele('.title', timeout=5)
+            title = title_ele.text if title_ele else ''
+        except:
+            pass
+
+        # 提取点赞数
+        like = ''
+        try:
+            like = get_note_like_text(note_page, html, note_url)
+        except:
+            pass
+
+        # 提取收藏数
+        collect = ''
+        try:
+            collect = get_note_collect_text(note_page, html, note_url)
+        except:
+            pass
+
+        # 提取评论数
+        comment = ''
+        try:
+            comment = get_note_comment_text(note_page, html, note_url)
+        except:
+            pass
+
+        # 提取发布时间
+        publish_time = ''
+        try:
+            publish_time = get_note_publish_time_text(note_page, html, note_url)
+        except:
+            pass
+
+        # 提取正文文案（若需展开全文则跳过）
+        content_text = ''
+        try:
+            content_text = get_note_content_text(note_page, html, note_url)
+        except:
+            pass
+
+
+        # 提取笔记类型
+        note_type = '图文'
+        try:
+            note_type = get_note_type(note_page, html, note_url)
+        except:
+            pass
+
+        return {
+            '作者': author,
+            '笔记类型': note_type,
+            '标题': title,
+            '发布时间': publish_time,
+            '正文文案': content_text,
+            '点赞数': like,
+            '收藏数': collect,
+            '评论数': comment,
+            '笔记链接': note_url
+        }
+    except Exception as e:
+        print(f'提取笔记信息失败: {note_url}, 错误: {e}')
+        return None
+
+
+def get_pic_urls(html: str):
+    soup = BeautifulSoup(html, 'html.parser')
+    urls = [tag['content'] for tag in soup.find_all('meta', attrs={'name': 'og:image'}) if tag.get('content')]
+    if not urls:
+        for img in soup.select('img'):
+            src = img.get('src') or img.get('data-src')
+            if src and src.startswith('http'):
+                urls.append(src)
+    return list(dict.fromkeys(urls))
+
+
+def get_note_id_from_url(note_url: str) -> str:
+    try:
+        return note_url.rstrip('/').split('/')[-1].split('?')[0]
+    except:
+        return ''
+
+
+def extract_like_from_initial_state(html: str, note_id: str) -> str:
+    if not html:
+        return ''
+
+    patterns = []
+    if note_id:
+        escaped_id = re.escape(note_id)
+        patterns.extend([
+            rf'"noteId":"{escaped_id}".{{0,5000}}?"interactInfo":\{{[^\{{\}}]*?"likedCount":"?([^",\}}]+)"?',
+            rf'"interactInfo":\{{[^\{{\}}]*?"likedCount":"?([^",\}}]+)"?[^\{{\}}]*\}}.{{0,5000}}?"noteId":"{escaped_id}"',
+        ])
+
+    patterns.append(r'"interactInfo":\{[^\{\}]*?"likedCount":"?([^",\}]+)"?')
+
+    for pattern in patterns:
+        match = re.search(pattern, html, re.S)
+        if not match:
+            continue
+        value = str(match.group(1)).strip()
+        if value:
+            return value
+    return ''
+
+
+def extract_interact_count_from_initial_state(html: str, note_id: str, key: str) -> str:
+    if not html or not key:
+        return ''
+
+    patterns = []
+    if note_id:
+        escaped_id = re.escape(note_id)
+        escaped_key = re.escape(key)
+        patterns.extend([
+            rf'"noteId":"{escaped_id}".{{0,5000}}?"interactInfo":\{{[^\{{\}}]*?"{escaped_key}":"?([^",\}}]+)"?',
+            rf'"interactInfo":\{{[^\{{\}}]*?"{escaped_key}":"?([^",\}}]+)"?[^\{{\}}]*\}}.{{0,5000}}?"noteId":"{escaped_id}"',
+        ])
+
+    patterns.append(rf'"interactInfo":\{{[^\{{\}}]*?"{re.escape(key)}":"?([^",\}}]+)"?')
+
+    for pattern in patterns:
+        match = re.search(pattern, html, re.S)
+        if not match:
+            continue
+        value = str(match.group(1)).strip()
+        if value:
+            return value
+    return ''
+
+
+def extract_note_field_from_initial_state(html: str, note_id: str, key: str) -> str:
+    if not html or not key:
+        return ''
+
+    patterns = []
+    escaped_key = re.escape(key)
+    if note_id:
+        escaped_id = re.escape(note_id)
+        patterns.extend([
+            rf'"noteId":"{escaped_id}".{{0,12000}}?"{escaped_key}":"([^"]+)"',
+            rf'"{escaped_key}":"([^"]+)".{{0,12000}}?"noteId":"{escaped_id}"',
+        ])
+
+    patterns.append(rf'"{escaped_key}":"([^"]+)"')
+
+    for pattern in patterns:
+        match = re.search(pattern, html, re.S)
+        if not match:
+            continue
+        value = str(match.group(1)).strip()
+        if value:
+            return value.replace('\\n', '\n').replace('\\t', '\t').strip()
+    return ''
+
+
+def get_note_like_text(note_page, html: str, note_url: str) -> str:
+    note_id = get_note_id_from_url(note_url)
+    like_from_state = extract_like_from_initial_state(html, note_id)
+    if like_from_state:
+        return like_from_state
+
+    selectors = [
+        '.interactions .like .count',
+        '.interactions .like-wrapper .count',
+        '.like-wrapper .count',
+        '.like .count',
+    ]
+
+    for selector in selectors:
+        try:
+            like_ele = note_page.ele(selector, timeout=2)
+            if like_ele and like_ele.text:
+                like_text = like_ele.text.strip()
+                if like_text:
+                    return like_text
+        except:
+            continue
+
+    return ''
+
+
+def get_note_collect_text(note_page, html: str, note_url: str) -> str:
+    note_id = get_note_id_from_url(note_url)
+    collect_from_state = extract_interact_count_from_initial_state(html, note_id, 'collectedCount')
+    if collect_from_state:
+        return collect_from_state
+
+    selectors = [
+        '.interactions .collect .count',
+        '.interactions .collect-wrapper .count',
+        '.collect-wrapper .count',
+        '.collect .count',
+    ]
+
+    for selector in selectors:
+        try:
+            collect_ele = note_page.ele(selector, timeout=2)
+            if collect_ele and collect_ele.text:
+                collect_text = collect_ele.text.strip()
+                if collect_text:
+                    return collect_text
+        except:
+            continue
+
+    return ''
+
+
+def get_note_comment_text(note_page, html: str, note_url: str) -> str:
+    note_id = get_note_id_from_url(note_url)
+    comment_from_state = extract_interact_count_from_initial_state(html, note_id, 'commentCount')
+    if comment_from_state:
+        return comment_from_state
+
+    selectors = [
+        '.interactions .chat .count',
+        '.interactions .comment-wrapper .count',
+        '.comment-wrapper .count',
+        '.chat-wrapper .count',
+        '.chat .count',
+    ]
+
+    for selector in selectors:
+        try:
+            comment_ele = note_page.ele(selector, timeout=2)
+            if comment_ele and comment_ele.text:
+                comment_text = comment_ele.text.strip()
+                if comment_text:
+                    return comment_text
+        except:
+            continue
+
+    return ''
+
+
+def need_expand_full_text(note_page, html: str, note_url: str) -> bool:
+    # 页面上可见“展开全文”按钮时直接跳过正文采集
+    selectors = [
+        '.show-more',
+        '.note-content .more',
+        '.desc .more',
+    ]
+    for selector in selectors:
+        try:
+            ele = note_page.ele(selector, timeout=1)
+            if ele and '展开全文' in (ele.text or ''):
+                return True
+        except:
+            continue
+
+    # 兜底：在页面源码中存在“展开全文”文本时也视为需要展开
+    return '展开全文' in (html or '')
+
+
+def get_note_publish_time_text(note_page, html: str, note_url: str) -> str:
+    note_id = get_note_id_from_url(note_url)
+
+    # 优先从初始数据提取
+    for key in ['publishTime', 'time', 'lastUpdateTime']:
+        value = extract_note_field_from_initial_state(html, note_id, key)
+        if value:
+            return value
+
+    # 页面元素兜底
+    selectors = [
+        '.note-date',
+        '.date',
+        '.publish-time',
+        '.note-time',
+    ]
+    for selector in selectors:
+        try:
+            ele = note_page.ele(selector, timeout=2)
+            if ele and ele.text:
+                text = ele.text.strip()
+                if text:
+                    return text
+        except:
+            continue
+    return ''
+
+
+def get_note_content_text(note_page, html: str, note_url: str) -> str:
+    if need_expand_full_text(note_page, html, note_url):
+        return ''
+
+    note_id = get_note_id_from_url(note_url)
+
+    # 优先从初始数据提取正文字段
+    for key in ['desc', 'description', 'content']:
+        value = extract_note_field_from_initial_state(html, note_id, key)
+        if value:
+            return value
+
+    # 页面元素兜底提取正文
+    selectors = [
+        '.note-content .desc',
+        '.desc',
+        '.content',
+    ]
+    for selector in selectors:
+        try:
+            ele = note_page.ele(selector, timeout=2)
+            if ele and ele.text:
+                text = ele.text.strip()
+                if text:
+                    return text
+        except:
+            continue
+    return ''
+
+
+def extract_note_type_from_initial_state(html: str, note_id: str) -> str:
+    if not html or not note_id:
+        return ''
+
+    note_anchor = f'"noteId":"{note_id}"'
+    start = 0
+    found_note_segment = False
+    while True:
+        idx = html.find(note_anchor, start)
+        if idx == -1:
+            break
+
+        segment = html[max(0, idx - 2000): idx + 15000]
+        has_interact = '"interactInfo":{' in segment
+        has_video = ('"video":{' in segment) or ('"type":"video"' in segment)
+
+        if has_interact:
+            found_note_segment = True
+            if has_video:
+                return '视频'
+
+        start = idx + len(note_anchor)
+
+    if found_note_segment:
+        return '图文'
+    return ''
+
+
+def get_note_type(note_page, html: str, note_url: str) -> str:
+    note_id = get_note_id_from_url(note_url)
+    note_type = extract_note_type_from_initial_state(html, note_id)
+    if note_type:
+        return note_type
+
+    media_video_selectors = [
+        '.note-scroller video',
+        '.note-content video',
+        '.media-container video',
+        '.swiper-wrapper video',
+    ]
+    for selector in media_video_selectors:
+        try:
+            if note_page.ele(selector, timeout=1):
+                return '视频'
+        except:
+            continue
+    return '图文'
+
+
+def get_baidu_access_token():
+    global BAIDU_ACCESS_TOKEN, BAIDU_TOKEN_EXPIRES_AT
+    if BAIDU_ACCESS_TOKEN and time.time() < BAIDU_TOKEN_EXPIRES_AT - 60:
+        return BAIDU_ACCESS_TOKEN
+    if not BAIDU_API_KEY or not BAIDU_SECRET_KEY:
+        raise ValueError('请先填写 BAIDU_API_KEY 和 BAIDU_SECRET_KEY')
+
+    params = {
+        'grant_type': 'client_credentials',
+        'client_id': BAIDU_API_KEY,
+        'client_secret': BAIDU_SECRET_KEY,
+    }
+    response = requests.get(BAIDU_OAUTH_URL, params=params, timeout=10)
+    response.raise_for_status()
+    data = response.json()
+    access_token = data.get('access_token')
+    expires_in = data.get('expires_in', 2592000)
+    if not access_token:
+        raise ValueError(f'获取百度 access_token 失败: {data}')
+
+    BAIDU_ACCESS_TOKEN = access_token
+    BAIDU_TOKEN_EXPIRES_AT = time.time() + int(expires_in)
+    return BAIDU_ACCESS_TOKEN
+
+
+def analyze_face_with_baidu(image_bytes: bytes):
+    token = get_baidu_access_token()
+    url = f'{BAIDU_FACE_DETECT_URL}?access_token={token}'
+    image_base64 = base64.b64encode(image_bytes).decode('utf-8')
+    payload = {
+        'image': image_base64,
+        'image_type': 'BASE64',
+        'face_field': 'gender,face_probability',
+        'max_face_num': 5,
+        'face_type': 'LIVE',
+        'quality_control': 'NONE',
+    }
+    headers = {'Content-Type': 'application/json'}
+    response = requests.post(url, headers=headers, json=payload, timeout=20)
+    response.raise_for_status()
+    data = response.json()
+    if data.get('error_code', 0) != 0:
+        raise ValueError(f'百度人脸检测失败 {data.get("error_code")}: {data.get("error_msg")}')
+    face_list = data.get('result', {}).get('face_list', [])
+    if face_list is None:
+        raise ValueError(f'百度人脸检测结果解析失败: {data}')
+    return face_list
+
+
+def convert_image_to_jpeg_bytes(image_bytes: bytes):
+    with Image.open(io.BytesIO(image_bytes)) as img:
+        if img.mode != 'RGB':
+            img = img.convert('RGB')
+        if max(img.size) > MAX_BAIDU_IMAGE_SIDE:
+            img.thumbnail((MAX_BAIDU_IMAGE_SIDE, MAX_BAIDU_IMAGE_SIDE), Image.LANCZOS)
+        output = io.BytesIO()
+        img.save(output, format='JPEG', quality=90)
+        jpeg_bytes = output.getvalue()
+        if len(jpeg_bytes) > MAX_BAIDU_IMAGE_SIZE:
+            output = io.BytesIO()
+            img.save(output, format='JPEG', quality=70)
+            jpeg_bytes = output.getvalue()
+        if len(jpeg_bytes) > MAX_BAIDU_IMAGE_SIZE:
+            raise ValueError(f'转换后图片仍然过大: {len(jpeg_bytes)} 字节')
+        return jpeg_bytes, img.width, img.height
+
+
+def is_valid_female_face(face: dict, img_area: float, min_face_ratio: float):
+    gender = face.get('gender', {})
+    face_prob = float(face.get('face_probability', 0.0))
+    gender_prob = float(gender.get('probability', 0.0))
+    gender_type = str(gender.get('type', '')).lower()
+    location = face.get('location', {})
+    width = float(location.get('width', 0.0))
+    height = float(location.get('height', 0.0))
+    face_area_ratio = 0.0
+    if width > 0 and height > 0:
+        face_area_ratio = (width * height) / img_area
+
+    if face_prob < FACE_PROB_THRESHOLD:
+        return False, f'face_prob={face_prob:.2f}低于阈值{FACE_PROB_THRESHOLD}'
+    if gender_prob < GENDER_PROB_THRESHOLD:
+        return False, f'gender_prob={gender_prob:.2f}低于阈值{GENDER_PROB_THRESHOLD}'
+    if gender_type != 'female':
+        return False, f'gender_type={gender_type}'
+    if face_area_ratio < min_face_ratio:
+        return False, f'face_ratio={face_area_ratio:.3f}低于阈值{min_face_ratio}'
+    return True, 'OK'
+
+
+def should_download_image(image_bytes: bytes, min_face_ratio: float = MIN_FACE_RATIO):
+    try:
+        jpeg_bytes, width, height = convert_image_to_jpeg_bytes(image_bytes)
+    except Exception as exc:
+        print(f'图像解析失败: {exc}')
+        return False
+    img_area = width * height
+    if img_area == 0:
+        return False
+
+    try:
+        face_list = analyze_face_with_baidu(jpeg_bytes)
+    except Exception as exc:
+        print(f'百度人脸检测失败: {exc}')
+        return False
+
+    if not face_list:
+        print('未识别到人脸。')
+        return False
+
+    #女性人脸
+    for index, face in enumerate(face_list, start=1):
+        valid, reason = is_valid_female_face(face, img_area, min_face_ratio)
+        print(f'  人脸#{index}: gender={face.get("gender")}, face_prob={face.get("face_probability")}, location={face.get("location")}, result={valid}, reason={reason}')
+        if valid:
+            return True
+    print('人脸存在但未满足女性人像条件。')
+    return False
+
+    #所有人脸
+    #for index, face in enumerate(face_list, start=1):
+        #valid, reason = is_valid_female_face(face, img_area, min_face_ratio)
+        #print(f'  人脸#{index}: face_prob={face.get("face_probability")}, location={face.get("location")}, result={valid}, reason={reason}')
+        #if valid:
+            #return True
+    #print('人脸存在但未满足女性人像条件。')
+    #return False
+
+
+def download_image(url: str, save_dir: str, prefix: str, index: int):
+    try:
+        headers = {
+            'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/126.0.0.0 Safari/537.36',
+            'Referer': 'https://www.xiaohongshu.com/',
+        }
+        response = requests.get(url, headers=headers, timeout=15)
+        response.raise_for_status()
+    except Exception as exc:
+        print(f'下载失败: {url} -> {exc}')
+        return False
+
+    if should_download_image(response.content):
+        ext = '.jpeg'
+        filename = sanitize_filename(f'{prefix}_{index + 1}{ext}')
+        filepath = os.path.join(save_dir, filename)
+        with open(filepath, 'wb') as f:
+            f.write(response.content)
+        print(f'已保存图片: {filepath}')
+        return True
+    return False
+
+
+def process_note(note_url: str, note_page, download_dir: str, note_index: int):
+    """
+    处理单个笔记：
+    1. 获取笔记页面
+    2. 提取笔记信息（作者、标题、点赞等）
+    3. 获取所有图片URL
+    4. 对每张图片进行人像检测，下载符合条件的图片
+    5. 返回笔记信息字典和是否成功（至少下载了一张图片）
+    """
+    note_page.get(note_url)
+    info = get_note_info(note_page, note_url)
+    if not info:
+        return None, False
+
+    html = note_page.html
+    image_urls = get_pic_urls(html)
+
+    downloaded_urls = []
+    for idx, img_url in enumerate(image_urls):
+        print(f'正在检测图片 {idx+1}/{len(image_urls)}: {img_url}')
+        # 生成前缀：作者名_笔记ID（从URL提取）
+        note_id = note_url.rstrip('/').split('/')[-1].split('?')[0]
+        prefix = f"{info['作者']}_{note_id}"
+        if download_image(img_url, download_dir, prefix, idx):
+            downloaded_urls.append(img_url)
+        time.sleep(random.uniform(IMAGE_DOWNLOAD_SLEEP_MIN, IMAGE_DOWNLOAD_SLEEP_MAX))
+
+    if downloaded_urls:
+        info['图片链接'] = '\n'.join(image_urls)
+        info['已下载女性图片链接'] = '\n'.join(downloaded_urls)
+        info['已下载图片数量'] = len(downloaded_urls)
+        return info, True
+    else:
+        print(f'跳过笔记（无符合条件图片）: {note_url}')
+        return info, False
+
+
+# ========== 新增：保存数据的函数 ==========
+def save_excel_on_interrupt(success_notes, output_dir, current_time):
+    """程序中断时保存已收集的数据到Excel"""
+    if not success_notes:
+        print("没有已成功处理的笔记数据，不保存Excel。")
+        return
+    output_excel = os.path.join(output_dir, f'女性人像笔记_{current_time}.xlsx')
+    df = pd.DataFrame(success_notes)
+    df.to_excel(output_excel, index=False)
+    print(f"程序中断，已保存已处理数据到: {output_excel}")
+# =====================================
+
+
+def run(txt_file_path: str):
+    # 登录（如果未登录，请取消注释并手动扫码）
+    # sign_in()
+
+    # 读取URL列表
+    note_urls = read_urls_from_txt(txt_file_path)
+    print(f'共读取 {len(note_urls)} 条笔记链接。')
+
+    # 创建输出目录（以时间戳命名）
+    current_time = time.strftime('%Y-%m-%d %H%M%S', time.localtime())
+    output_dir = os.path.join(BASE_OUTPUT_ROOT, f'筛选结果_{current_time}')
+    os.makedirs(output_dir, exist_ok=True)
+    download_dir = os.path.join(output_dir, '下载图片')
+    os.makedirs(download_dir, exist_ok=True)
+
+    # 创建浏览器对象（复用）
+    note_page = ChromiumPage()
+    note_page.set.window.max()
+
+    success_notes = []
+
+    # ========== 异常处理 ==========
+    try:
+        for idx, note_url in enumerate(tqdm(note_urls, desc='处理笔记')):
+            info, success = process_note(note_url, note_page, download_dir, idx)
+            if success and info:
+                success_notes.append(info)
+            if (idx + 1) % BATCH_PAUSE_EVERY == 0:
+                sleep_time = random.uniform(BATCH_PAUSE_MIN, BATCH_PAUSE_MAX)
+                print(f'已处理 {idx+1} 条笔记，休眠 {sleep_time:.1f} 秒以避免限流。')
+                time.sleep(sleep_time)
+    except (KeyboardInterrupt, Exception) as e:
+        print(f"\n程序异常终止: {e}")
+        # 保存已收集的数据
+        save_excel_on_interrupt(success_notes, output_dir, current_time)
+        # 重新抛出异常，让程序自然退出（也可以注释掉 raise 以避免异常堆栈）
+        raise
+    finally:
+        # 确保浏览器关闭
+        note_page.quit()
+    # =============================
+
+    if not success_notes:
+        print('没有任何含女性人像的笔记，程序结束。')
+        return
+
+    # 正常结束时保存Excel
+    output_excel = os.path.join(output_dir, f'女性人像笔记_{current_time}.xlsx')
+    df = pd.DataFrame(success_notes)
+    df.to_excel(output_excel, index=False)
+    print(f'已保存 Excel: {output_excel}')
+    print(f'已保存图片目录: {download_dir}')
+
+
+if __name__ == '__main__':
+    # 请在此修改txt文件路径
+    txt_file_path = r''
+    run(txt_file_path)
