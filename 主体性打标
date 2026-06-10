@@ -1,4 +1,4 @@
-"""Batch label female subjectivity in local ad images with OpenRouter Gemini 1.5 Pro.
+"""Batch label female subjectivity in local ad images with Gemini 3.5flash.
 
 Workflow:
 1. Read an Excel file with human labels and a match-key column.
@@ -42,7 +42,7 @@ IMAGE_EXTENSIONS = {
 }
 
 OPENROUTER_CHAT_URL = "https://aihubmix.com/v1/chat/completions"
-DEFAULT_MODEL = "gpt-5.1"
+DEFAULT_MODEL = "gemini-3.5-flash"
 DEFAULT_TEMPERATURE = 0.0
 DEFAULT_MAX_TOKENS = 1500
 DEFAULT_RETRY_TIMES = 3
@@ -57,12 +57,13 @@ Specifically:
 - Autonomy: whether she appears to have self-will, independence, and self-possession.
 - Agency: whether she appears to act, choose, participate, initiate, control, or express intention.
 - Inner experience: whether she appears to have her own feelings, thoughts, internal perspective, individuality, or narrative presence, rather than merely displaying beauty, emotion, cuteness, sexiness, product effects, or a role-based function without a clear sense of her own perspective.
-?- Gaze/viewing relation: whether the visual relationship reflects a relatively equal or mutually recognized psychological presence between the woman and the viewer or others, rather than being dominated by the observer or camera.
-?
+- Gaze/viewing relation: whether the visual relationship reflects a relatively equal or mutually recognized psychological presence between the woman and the viewer or others, rather than being dominated by the observer or camera.
+
 Theoretical references:
 - Objectification theory: Low subjectivity may be signaled by instrumentality, denial of autonomy, inertness, fungibility, bodily fragmentation, ownership-like presentation, and denial of subjective experience; consider these only when visually observable.
 - Agency: High subjectivity may be signaled by visible choice, intentional action, initiative, control, competence, or self-expression.
 - Gaze: High subjectivity is indicated when the woman is presented in a relatively equal or self-possessed visual relation with the viewer or others; low subjectivity is indicated when she is visually dominated, objectified, passively displayed, or arranged for viewer consumption.
+
 Important disambiguation rules:
 1.Do not rely on single cues.
 - Being pretty, stylish, high-end, sexy, young, slim, polished, or camera-ready does not automatically indicate either high or low subjectivity.
@@ -72,35 +73,60 @@ Important disambiguation rules:
 - Looking at the camera may support subjectivity only when it creates an equal, self-possessed, intentional, or non-appeasing visual relation.
 - Direct, intense, confident, or confrontational gaze should not be treated as strong agency or inner experience if it is embedded in a posed, appeasing, seductive, constrained, fragile, childlike, or body-display presentation.
 - A polished, pleasant, charming, or confident beauty-ad expression should not substantially raise the score unless it conveys individuality, self-possession, or intentional presence.
+- A direct-looking face should not be treated as confident or authoritative when the gaze appears unfocused, generic, blank, mechanically posed, or mainly camera-ready. Direct gaze raises subjectivity only when it conveys clear self-possession, intentional presence, or equal psychological engagement.
+- Even in a highly posed beauty image, direct gaze may support moderate to high subjectivity when it is clearly focused, self-possessed, and psychologically forceful, and when the woman appears to control the viewing relation rather than simply offer her appearance for display.
+- Confident, expressive, or striking poses may support higher subjectivity when they convey self-directed, assertive, rebellious, or viewer-independent presence, rather than merely serving as aesthetic display or viewer-focused decoration.
 3.Averted gaze, back-facing pose, or not looking at the camera is not automatically low subjectivity.
 - Averted gaze, profile view, back-facing pose, low light, or cinematic atmosphere may still show subjectivity when the woman appears self-possessed, non-appeasing, visually central, story-bearing, or situated within her own world rather than performing for the viewer.
 - However, quietness, softness, downward gaze, or a contemplative mood should not be equated with strong inner experience unless it clearly gives the woman her own perspective, narrative presence, or self-contained agency. Mood alone is not enough.
+- Downward gaze, closed eyes, lowered eyelids, quietness, softness, or contemplative mood should not automatically be treated as passivity or low subjectivity. In posed beauty or luxury images, these cues may still indicate moderate subjectivity when the woman appears composed, dignified, self-contained, non-appeasing, and not visually available for the viewer's control. However, mood alone should not be treated as strong inner experience.
+- A soft, pleasant, gentle, or minimally styled expression should not be automatically treated as appeasing or viewer-serving. It may still support moderate to somewhat high subjectivity when the woman appears relaxed, steady, self-possessed, and not coy, inviting, or visually arranged mainly for viewer consumption.
+- A confident, relaxed, self-possessed smile should not be treated as merely appeasing or viewer-serving. A polished commercial smile may support higher subjectivity when the woman appears comfortable, socially confident, visually in control, and not vulnerable, submissive, fragile, or arranged only for viewer consumption.
+- Looking upward, away, or into the distance should not be treated as strong inner experience by itself. It may suggest subjectivity only when the woman appears to have a clear self-contained perspective, narrative presence, or intentional psychological presence, rather than simply posing in a soft, aspirational, or advertising-style mood.
+- Averted, sideward, or partially off-camera gaze may still support moderate to somewhat high subjectivity when it conveys cool distance, firmness, superiority, self-possession, or viewer-independence, rather than shyness, avoidance, submission, fragility, or passive display.
 4.Apparent activity is not automatically agency.
 - Do not overvalue apparent agency. Apparent agency includes visually active behaviors such as holding objects, posing, gesturing, looking at the camera, presenting a product, using a product, looking in a mirror, or appearing to control the image.
 - These cues should raise the score only when they clearly express autonomy, intention, choice, inner perspective, control, or an equal relation with the viewer.
 - If the active-looking behavior mainly serves to display her appearance, body, cuteness, sexiness, fragility, desirability, availability, or cosmetic effect for the viewer, it should not be treated as strong agency.
+- Routine product use or focused attention on a product should not be overvalued as agency. If the woman is simply demonstrating, testing, or applying a product without clear visual authority, individuality, or self-directed expression, the score should remain moderate rather than high.
 5.Product use or product prominence is not automatically high or low subjectivity.
 - Do not automatically treat applying, holding, demonstrating, or presenting a product as high subjectivity. Product use may suggest agency or personal experience only when the woman is clearly presented as acting with autonomy, intention, self-expression, or her own perspective, rather than merely serving as a model, demonstration figure, or carrier of the product effect.
 - Do not infer genuine personal experience merely from product application, mirror-gazing, endorsement-style text, or a recommendation format.
 - Do not automatically treat product prominence, foregrounded product placement, selective focus on the product, or a blurred face as low subjectivity. Even when the product is the sharpest or most visually emphasized element, the woman may still show moderate or high subjectivity if she appears intentional, visually commanding, self-possessed, or in control of the viewing relation.
+- Product presentation should not be penalized as low subjectivity when the woman remains visually dominant, self-possessed, and socially confident. Holding a product can still indicate moderate or high subjectivity if she appears to present it from a position of ease, control, and personal presence, rather than being reduced to a passive product carrier.
+- A skincare or beauty image should not be judged as low subjectivity merely because the woman's skin, beauty effect, or product result is visually emphasized. When she appears to be genuinely using, experiencing, or engaging with the product in a calm, self-directed, non-appeasing way, this may indicate moderate subjectivity rather than passive product display.
+- Extending, offering, or placing a product toward the viewer should not be treated as merely product-serving when the gesture appears assertive, initiating, or controlling the interaction. Such a gesture may support agency if the woman appears to set the visual relation rather than passively display the product.
+- Reaching or extending a product toward the camera may support agency when the gesture appears initiating, assertive, or interaction-setting, rather than merely decorative or passively display-oriented.
 6.Stylized, posed, fashion, makeup, or cinematic images are not automatically low subjectivity.
 - Aesthetic, cinematic, stylized, posed, fashion-focused, makeup-focused, or product-focused presentation should not be equated with objectification.
 - Such presentation may lower subjectivity if it reduces the woman to visual decoration, body display, product effect, or viewer consumption.
-- It may support subjectivity if it gives her individuality, atmosphere, narrative presence, visual authority, non-appeasing attitude, or self-possessed presence.
+- It may support subjectivity if it gives her individuality, atmosphere, narrative presence, visual authority, non-appeasing attitude, or self-possessed presence, provided that she remains a psychologically and visually present subject rather than being fragmented, hidden, or reduced to a decorative part of the composition.
+- Visual fragmentation or occlusion by props, set design, borders, or compositional devices may lower subjectivity when the woman is reduced to separated parts, partially hidden, or treated as one decorative element within the composition rather than a fully present subject, even if she shows direct gaze or a confident expression.
+- In a posed or beauty-focused image, a clearly focused, sharp, self-possessed gaze may still support moderate subjectivity when it creates a viewer-dominant or psychologically forceful relation, even if some elements of the pose remain display-oriented.
+- Stylized, shiny, or decorative clothing and accessories may enhance perceived confidence, dignity, or presence when the woman remains visually dominant and self-possessed, rather than serving merely as decorative or viewer-serving elements.
 7.Roles, care, work, service, and interaction are not automatically high or low subjectivity.
 - Do not automatically treat emotional expression, warmth, intimacy, caregiving, motherhood, work, service, or interaction with others as either high or low subjectivity.
 - These roles may indicate high subjectivity when the woman is visually presented as autonomous, intentional, competent, expressive, and recognized as an individual subject.
 - They may indicate low subjectivity when she is visually reduced to a function, duty, emotional labor, self-sacrifice, passivity, or relational identity, with weakened individuality, autonomy, or agency.
 - Being attended to, styled, made up, photographed, served, or acted upon by others does not by itself indicate agency. If she is mainly receiving treatment, being arranged, or passively participating in a scene, the score should not be raised unless she shows clear initiative, control, or individual presence.
 - Do not infer active participation merely from the presence of other people, tools, products, or an event setting. Agency should be based on what the woman herself visibly does or expresses, not on surrounding activity.
+- In caregiving or motherhood images, warmth, tenderness, closeness, or calm eye contact should not automatically raise subjectivity. If the woman is visually reduced to a caregiving function, emotional labor, bodily support, or relational role, and her individuality, autonomy, or full visual presence is weakened, the score should remain low to moderate.
+- Cropping that shows only part of the woman's face or body in a caregiving scene may lower subjectivity when the child, care task, or relational function dominates the image and the woman appears tired, constrained, secondary, or partially erased as an individual subject.
+- A professional title, expert role, uniform, white coat, name label, or authority-related text should not automatically raise subjectivity. These cues may support higher subjectivity only when the woman herself appears visually authoritative, self-possessed, intentional, and individually present. If she mainly functions as a static endorsement figure, professional symbol, or decorative expert image beside the product or text, the score should remain moderate rather than high.
+- Do not infer professional authority or expert identity merely from white clothing, clean styling, formal-looking attire, brand ambassador text, or a polished advertisement layout. Such cues should raise subjectivity only when the image clearly presents the woman as an active professional, expert, decision-maker, or authority figure through her own visible role, action, posture, or expression.
+- Do not infer autonomy or high subjectivity merely because the woman appears to willingly care for, hold, comfort, or attend to a child. In caregiving scenes, the key question is whether she is visually presented as an individual subject beyond the caregiving role. If her visible action mainly expresses relational duty, bodily support, emotional labor, or role-based function, the score should remain moderate rather than high, even when she looks directly at the camera or appears competent.
 8.Body display, fragility, and constrained posing may lower subjectivity.
 - Poses that look physically constrained, uncomfortable, overly arranged, submissive, or designed mainly to display the body should lower subjectivity, even if the woman looks directly at the camera or has a strong facial expression.
 - Revealing clothing, exposed legs, body-emphasizing composition, or sexy styling should not automatically mean low subjectivity. However, when these elements become the main visual focus and appear designed for viewer consumption rather than the woman's own expression, action, or authority, they may lower subjectivity.
 - A youthful, delicate, fragile, childlike, or highly beautified presentation may lower subjectivity when it makes the woman appear visually available, vulnerable, ornamental, or primarily designed for viewer desire rather than autonomous or self-possessed.
+- Beauty, makeup, jewelry, or luxury styling should not automatically be treated as objectification. These elements may lower subjectivity when they make the woman appear mainly decorative, consumable, fragile, or arranged for viewer desire. However, they may support moderate to somewhat high subjectivity when they contribute to a composed, cool, dignified, self-possessed, or visually elevated presence that is non-appeasing and not visually available for viewer consumption.
+- Bodily fragmentation, cropped eyes, or partial-face framing should lower subjectivity, but should be treated as very low subjectivity mainly when the image also creates strong viewer consumption, sexualized availability, passivity, vulnerability, or decorative objectification. If the fragmentation is clear but relatively neutral, product-focused, or not strongly seductive or viewer-serving, the score may remain low rather than extremely low.
 9.Camera angle and visual hierarchy matter.
 - Consider camera angle, eye-line, focus, cropping, and visual hierarchy as part of the viewing relation.
 - A visual relation in which the woman appears less appeasing, less visually dominated, or more positionally strong — for example, when she is positioned above the camera or looks downward toward a lower camera — may support higher subjectivity.
 - Cropped framing, bodily fragmentation, visible fatigue, emotional depletion, constrained posture, lack of equal visual presence, or being visually secondary to a role, scene, product, or viewer gaze may lower subjectivity.
+- A low-angle viewpoint or a downward gaze toward a lower camera may support higher subjectivity when it gives the woman a positionally strong, commanding, or viewer-independent presence. Even in a posed or product-related image, such cues may indicate moderate to high subjectivity if she appears to control the visual relation rather than merely serve the viewer.
+- Foregrounded product focus, shallow depth of field, or a partially blurred face should not substantially lower subjectivity when the woman appears positionally strong, self-possessed, and in control of the visual interaction, such as through a low-angle relation or an initiating forward gesture.
 
 Scoring guidance:
 1 = Very low subjectivity: clearly objectified, passive, decorative, fragmented, function-like, or only for viewing.
@@ -110,7 +136,8 @@ Scoring guidance:
 5 = Somewhat high subjectivity: some autonomy, individuality, self-possession, narrative presence, visual authority, or equal viewing relation.
 6 = High subjectivity: clearly self-possessed, intentional, agentic, expressive, or visually recognized as an individual subject.
 7 = Very high subjectivity: strongly autonomous, agentic, intentional, internally present, visually authoritative, and treated as a subject rather than an object.
-
+- Use the full 1-7 scale when the visual evidence clearly supports it; do not avoid very low or very high scores merely because the image is commercial, stylized, or posed.
+- Commercial, stylized, or product-focused presentation should not prevent using high scores when visual evidence clearly supports it.
 
 Output instructions:
 Return JSON only, no Markdown, no extra text, with exactly these keys:
@@ -177,9 +204,9 @@ class Task:
 
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="Batch annotate female subjectivity with OpenRouter Gemini 2.5 Pro")
-    parser.add_argument("--input-excel", default=r"D:\研究生\论文\女性广告\机器学习\llm annotation迭代100张.xlsx", help="Input Excel file")
-    parser.add_argument("--image-dir", default=r"D:\研究生\论文\女性广告\机器学习\llm annotation prompt小量迭代", help="Local image folder")
-    parser.add_argument("--output-dir", default=r"D:\研究生\论文\女性广告\机器学习\LLM主体性标注结果", help="Output folder")
+    parser.add_argument("--input-excel", default=r"D:\llm annotation200张test.xlsx", help="Input Excel file")
+    parser.add_argument("--image-dir", default=r"D:\llm annotation test", help="Local image folder")
+    parser.add_argument("--output-dir", default=r"D:\LLM主体性标注结果", help="Output folder")
     parser.add_argument("--sheet-name", default=None, help="Excel sheet name; default is first sheet")
     parser.add_argument("--binary-col", default=None, help="Human binary label column name")
     parser.add_argument("--continuous-col", default=None, help="Human 1-7 score column name")
