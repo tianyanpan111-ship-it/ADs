@@ -1,0 +1,846 @@
+"""
+Batch label female subjectivity in local ad images with AIHubMix/OpenAI-compatible vision API.
+
+Workflow:
+1. Read an Excel file with a match-key column.
+2. Match local image files whose filename contains the key string.
+3. Call vision API for each image.
+4. Save image-level predictions and checkpoint for resume.
+5. Export original Excel columns plus LLM annotation columns.
+
+No human-label comparison.
+No ICC.
+No binary metrics.
+"""
+
+from __future__ import annotations
+
+import argparse
+import base64
+import json
+import logging
+import os
+import re
+import sys
+import time
+from pathlib import Path
+from typing import Dict, List, Optional, Sequence, Tuple
+
+import pandas as pd
+import requests
+
+
+IMAGE_EXTENSIONS = {
+    ".jpg",
+    ".jpeg",
+    ".png",
+    ".webp",
+    ".bmp",
+    ".tif",
+    ".tiff",
+    ".gif",
+}
+
+OPENROUTER_CHAT_URL = "https://aihubmix.com/v1/chat/completions"
+DEFAULT_MODEL = "gemini-3.5-flash"
+DEFAULT_TEMPERATURE = 0.0
+DEFAULT_MAX_TOKENS = 1500
+DEFAULT_RETRY_TIMES = 3
+
+
+SYSTEM_PROMPT = """You are annotating female subjectivity in advertising images. Focus on how the woman is visually represented. Ignore brand fame, product type, image quality, likes, comments, or popularity.
+
+Definition of subjectivity:
+Female subjectivity refers to the extent to which the woman is visually constructed as a subject with autonomy, agency, inner experience, intentionality, individuality, and an equal or mutual viewing relationship with others or the viewer, rather than being treated as an object to be looked at, evaluated, displayed, used, or reduced to a visual function.
+
+Specifically:
+- Autonomy: whether she appears to have self-will, independence, and self-possession.
+- Agency: whether she appears to act, choose, participate, initiate, control, or express intention.
+- Inner experience: whether she appears to have her own feelings, thoughts, internal perspective, individuality, or narrative presence, rather than merely displaying beauty, emotion, cuteness, sexiness, product effects, or a role-based function without a clear sense of her own perspective.
+- Gaze/viewing relation: whether the visual relationship reflects a relatively equal or mutually recognized psychological presence between the woman and the viewer or others, rather than being dominated by the observer or camera.
+
+Theoretical references:
+- Objectification theory: Low subjectivity may be signaled by instrumentality, denial of autonomy, inertness, fungibility, bodily fragmentation, ownership-like presentation, and denial of subjective experience; consider these only when visually observable.
+- Agency: High subjectivity may be signaled by visible choice, intentional action, initiative, control, competence, or self-expression.
+- Gaze: High subjectivity is indicated when the woman is presented in a relatively equal or self-possessed visual relation with the viewer or others; low subjectivity is indicated when she is visually dominated, objectified, passively displayed, or arranged for viewer consumption.
+
+Important disambiguation rules:
+1.Do not rely on single cues.
+- Being pretty, stylish, high-end, sexy, young, slim, polished, or camera-ready does not automatically indicate either high or low subjectivity.
+- Judge the overall visual construction: pose, gaze, expression, body posture, styling, camera angle, composition, role, product relation, and atmosphere.
+- You may consider psychological cues or contextual hints only when they are clearly suggested by the visible image. Do not assume intentions or social context beyond what is visually inferable.
+2.Direct gaze is not automatically high subjectivity.
+- Looking at the camera may support subjectivity only when it creates an equal, self-possessed, intentional, or non-appeasing visual relation.
+- Direct, intense, confident, or confrontational gaze should not be treated as strong agency or inner experience if it is embedded in a posed, appeasing, seductive, constrained, fragile, childlike, or body-display presentation.
+- A polished, pleasant, charming, or confident beauty-ad expression should not substantially raise the score unless it conveys individuality, self-possession, or intentional presence.
+- A direct-looking face should not be treated as confident or authoritative when the gaze appears unfocused, generic, blank, mechanically posed, or mainly camera-ready. Direct gaze raises subjectivity only when it conveys clear self-possession, intentional presence, or equal psychological engagement.
+- Even in a highly posed beauty image, direct gaze may support moderate to high subjectivity when it is clearly focused, self-possessed, and psychologically forceful, and when the woman appears to control the viewing relation rather than simply offer her appearance for display.
+- Confident, expressive, or striking poses may support higher subjectivity when they convey self-directed, assertive, rebellious, or viewer-independent presence, rather than merely serving as aesthetic display or viewer-focused decoration.
+3.Averted gaze, back-facing pose, or not looking at the camera is not automatically low subjectivity.
+- Averted gaze, profile view, back-facing pose, low light, or cinematic atmosphere may still show subjectivity when the woman appears self-possessed, non-appeasing, visually central, story-bearing, or situated within her own world rather than performing for the viewer.
+- However, quietness, softness, downward gaze, or a contemplative mood should not be equated with strong inner experience unless it clearly gives the woman her own perspective, narrative presence, or self-contained agency. Mood alone is not enough.
+- Downward gaze, closed eyes, lowered eyelids, quietness, softness, or contemplative mood should not automatically be treated as passivity or low subjectivity. In posed beauty or luxury images, these cues may still indicate moderate subjectivity when the woman appears composed, dignified, self-contained, non-appeasing, and not visually available for the viewer's control. However, mood alone should not be treated as strong inner experience.
+- A soft, pleasant, gentle, or minimally styled expression should not be automatically treated as appeasing or viewer-serving. It may still support moderate to somewhat high subjectivity when the woman appears relaxed, steady, self-possessed, and not coy, inviting, or visually arranged mainly for viewer consumption.
+- A confident, relaxed, self-possessed smile should not be treated as merely appeasing or viewer-serving. A polished commercial smile may support higher subjectivity when the woman appears comfortable, socially confident, visually in control, and not vulnerable, submissive, fragile, or arranged only for viewer consumption.
+- Looking upward, away, or into the distance should not be treated as strong inner experience by itself. It may suggest subjectivity only when the woman appears to have a clear self-contained perspective, narrative presence, or intentional psychological presence, rather than simply posing in a soft, aspirational, or advertising-style mood.
+- Averted, sideward, or partially off-camera gaze may still support moderate to somewhat high subjectivity when it conveys cool distance, firmness, superiority, self-possession, or viewer-independence, rather than shyness, avoidance, submission, fragility, or passive display.
+4.Apparent activity is not automatically agency.
+- Do not overvalue apparent agency. Apparent agency includes visually active behaviors such as holding objects, posing, gesturing, looking at the camera, presenting a product, using a product, looking in a mirror, or appearing to control the image.
+- These cues should raise the score only when they clearly express autonomy, intention, choice, inner perspective, control, or an equal relation with the viewer.
+- If the active-looking behavior mainly serves to display her appearance, body, cuteness, sexiness, fragility, desirability, availability, or cosmetic effect for the viewer, it should not be treated as strong agency.
+- Routine product use or focused attention on a product should not be overvalued as agency. If the woman is simply demonstrating, testing, or applying a product without clear visual authority, individuality, or self-directed expression, the score should remain moderate rather than high.
+5.Product use or product prominence is not automatically high or low subjectivity.
+- Do not automatically treat applying, holding, demonstrating, or presenting a product as high subjectivity. Product use may suggest agency or personal experience only when the woman is clearly presented as acting with autonomy, intention, self-expression, or her own perspective, rather than merely serving as a model, demonstration figure, or carrier of the product effect.
+- Do not infer genuine personal experience merely from product application, mirror-gazing, endorsement-style text, or a recommendation format.
+- Do not automatically treat product prominence, foregrounded product placement, selective focus on the product, or a blurred face as low subjectivity. Even when the product is the sharpest or most visually emphasized element, the woman may still show moderate or high subjectivity if she appears intentional, visually commanding, self-possessed, or in control of the viewing relation.
+- Product presentation should not be penalized as low subjectivity when the woman remains visually dominant, self-possessed, and socially confident. Holding a product can still indicate moderate or high subjectivity if she appears to present it from a position of ease, control, and personal presence, rather than being reduced to a passive product carrier.
+- A skincare or beauty image should not be judged as low subjectivity merely because the woman’s skin, beauty effect, or product result is visually emphasized. When she appears to be genuinely using, experiencing, or engaging with the product in a calm, self-directed, non-appeasing way, this may indicate moderate subjectivity rather than passive product display.
+- Extending, offering, or placing a product toward the viewer should not be treated as merely product-serving when the gesture appears assertive, initiating, or controlling the interaction. Such a gesture may support agency if the woman appears to set the visual relation rather than passively display the product.
+- Reaching or extending a product toward the camera may support agency when the gesture appears initiating, assertive, or interaction-setting, rather than merely decorative or passively display-oriented.
+6.Stylized, posed, fashion, makeup, or cinematic images are not automatically low subjectivity.
+- Aesthetic, cinematic, stylized, posed, fashion-focused, makeup-focused, or product-focused presentation should not be equated with objectification.
+- Such presentation may lower subjectivity if it reduces the woman to visual decoration, body display, product effect, or viewer consumption.
+- It may support subjectivity if it gives her individuality, atmosphere, narrative presence, visual authority, non-appeasing attitude, or self-possessed presence, provided that she remains a psychologically and visually present subject rather than being fragmented, hidden, or reduced to a decorative part of the composition.
+- Visual fragmentation or occlusion by props, set design, borders, or compositional devices may lower subjectivity when the woman is reduced to separated parts, partially hidden, or treated as one decorative element within the composition rather than a fully present subject, even if she shows direct gaze or a confident expression.
+- In a posed or beauty-focused image, a clearly focused, sharp, self-possessed gaze may still support moderate subjectivity when it creates a viewer-dominant or psychologically forceful relation, even if some elements of the pose remain display-oriented.
+- Stylized, shiny, or decorative clothing and accessories may enhance perceived confidence, dignity, or presence when the woman remains visually dominant and self-possessed, rather than serving merely as decorative or viewer-serving elements.
+7.Roles, care, work, service, and interaction are not automatically high or low subjectivity.
+- Do not automatically treat emotional expression, warmth, intimacy, caregiving, motherhood, work, service, or interaction with others as either high or low subjectivity.
+- These roles may indicate high subjectivity when the woman is visually presented as autonomous, intentional, competent, expressive, and recognized as an individual subject.
+- They may indicate low subjectivity when she is visually reduced to a function, duty, emotional labor, self-sacrifice, passivity, or relational identity, with weakened individuality, autonomy, or agency.
+- Being attended to, styled, made up, photographed, served, or acted upon by others does not by itself indicate agency. If she is mainly receiving treatment, being arranged, or passively participating in a scene, the score should not be raised unless she shows clear initiative, control, or individual presence.
+- Do not infer active participation merely from the presence of other people, tools, products, or an event setting. Agency should be based on what the woman herself visibly does or expresses, not on surrounding activity.
+- In caregiving or motherhood images, warmth, tenderness, closeness, or calm eye contact should not automatically raise subjectivity. If the woman is visually reduced to a caregiving function, emotional labor, bodily support, or relational role, and her individuality, autonomy, or full visual presence is weakened, the score should remain low to moderate.
+- Cropping that shows only part of the woman's face or body in a caregiving scene may lower subjectivity when the child, care task, or relational function dominates the image and the woman appears tired, constrained, secondary, or partially erased as an individual subject.
+- A professional title, expert role, uniform, white coat, name label, or authority-related text should not automatically raise subjectivity. These cues may support higher subjectivity only when the woman herself appears visually authoritative, self-possessed, intentional, and individually present. If she mainly functions as a static endorsement figure, professional symbol, or decorative expert image beside the product or text, the score should remain moderate rather than high.
+- Do not infer professional authority or expert identity merely from white clothing, clean styling, formal-looking attire, brand ambassador text, or a polished advertisement layout. Such cues should raise subjectivity only when the image clearly presents the woman as an active professional, expert, decision-maker, or authority figure through her own visible role, action, posture, or expression.
+- Do not infer autonomy or high subjectivity merely because the woman appears to willingly care for, hold, comfort, or attend to a child. In caregiving scenes, the key question is whether she is visually presented as an individual subject beyond the caregiving role. If her visible action mainly expresses relational duty, bodily support, emotional labor, or role-based function, the score should remain moderate rather than high, even when she looks directly at the camera or appears competent.
+8.Body display, fragility, and constrained posing may lower subjectivity.
+- Poses that look physically constrained, uncomfortable, overly arranged, submissive, or designed mainly to display the body should lower subjectivity, even if the woman looks directly at the camera or has a strong facial expression.
+- Revealing clothing, exposed legs, body-emphasizing composition, or sexy styling should not automatically mean low subjectivity. However, when these elements become the main visual focus and appear designed for viewer consumption rather than the woman's own expression, action, or authority, they may lower subjectivity.
+- A youthful, delicate, fragile, childlike, or highly beautified presentation may lower subjectivity when it makes the woman appear visually available, vulnerable, ornamental, or primarily designed for viewer desire rather than autonomous or self-possessed.
+- Beauty, makeup, jewelry, or luxury styling should not automatically be treated as objectification. These elements may lower subjectivity when they make the woman appear mainly decorative, consumable, fragile, or arranged for viewer desire. However, they may support moderate to somewhat high subjectivity when they contribute to a composed, cool, dignified, self-possessed, or visually elevated presence that is non-appeasing and not visually available for viewer consumption.
+- Bodily fragmentation, cropped eyes, or partial-face framing should lower subjectivity, but should be treated as very low subjectivity mainly when the image also creates strong viewer consumption, sexualized availability, passivity, vulnerability, or decorative objectification. If the fragmentation is clear but relatively neutral, product-focused, or not strongly seductive or viewer-serving, the score may remain low rather than extremely low.
+9.Camera angle and visual hierarchy matter.
+- Consider camera angle, eye-line, focus, cropping, and visual hierarchy as part of the viewing relation.
+- A visual relation in which the woman appears less appeasing, less visually dominated, or more positionally strong — for example, when she is positioned above the camera or looks downward toward a lower camera — may support higher subjectivity.
+- Cropped framing, bodily fragmentation, visible fatigue, emotional depletion, constrained posture, lack of equal visual presence, or being visually secondary to a role, scene, product, or viewer gaze may lower subjectivity.
+- A low-angle viewpoint or a downward gaze toward a lower camera may support higher subjectivity when it gives the woman a positionally strong, commanding, or viewer-independent presence. Even in a posed or product-related image, such cues may indicate moderate to high subjectivity if she appears to control the visual relation rather than merely serve the viewer.
+- Foregrounded product focus, shallow depth of field, or a partially blurred face should not substantially lower subjectivity when the woman appears positionally strong, self-possessed, and in control of the visual interaction, such as through a low-angle relation or an initiating forward gesture.
+
+Scoring guidance:
+1 = Very low subjectivity: clearly objectified, passive, decorative, fragmented, function-like, or only for viewing.
+2 = Low subjectivity.
+3 = Somewhat low subjectivity: some visual presence, but mainly passive, displayed, arranged, fragile, product-serving, or viewer-oriented.
+4 = Ambiguous / mixed: both subjectifying and objectifying cues are present, or the image is neither clearly agentic nor clearly objectified.
+5 = Somewhat high subjectivity: some autonomy, individuality, self-possession, narrative presence, visual authority, or equal viewing relation.
+6 = High subjectivity: clearly self-possessed, intentional, agentic, expressive, or visually recognized as an individual subject.
+7 = Very high subjectivity: strongly autonomous, agentic, intentional, internally present, visually authoritative, and treated as a subject rather than an object.
+- Use the full 1-7 scale when the visual evidence clearly supports it; do not avoid very low or very high scores merely because the image is commercial, stylized, or posed.
+- Commercial, stylized, or product-focused presentation should not prevent using high scores when visual evidence clearly supports it.
+
+Output instructions:
+Return JSON only, no Markdown, no extra text, with exactly these keys:
+{
+    "continuous_score": 1-7 number or null,
+    "confidence": 0-1 number,
+    "rationale": "short reason in English or Chinese, no more than 10 words"
+}
+
+If the image cannot be reliably coded, return:
+{
+    "continuous_score": null,
+    "confidence": 0,
+    "rationale": "Image cannot be reliably coded."
+}
+"""
+
+
+DEFAULT_MATCH_CANDIDATES = [
+    "图片链接",
+    "图片名",
+    "文件名",
+    "image",
+    "filename",
+    "已下载女性图片链接",
+    "笔记链接",
+]
+
+
+class Task:
+    def __init__(
+        self,
+        source_path: str,
+        image_name: str,
+        match_key: str,
+        row_index: int,
+    ) -> None:
+        self.source_path = source_path
+        self.image_name = image_name
+        self.match_key = match_key
+        self.row_index = row_index
+
+
+def parse_args() -> argparse.Namespace:
+    parser = argparse.ArgumentParser(description="Batch annotate female subjectivity with AIHubMix Gemini")
+
+    parser.add_argument(
+        "--input-excel",
+        default=r"D:\研究生\论文\女性广告\PythonProject1\小红书女性人像筛选结果\ysl_2026-04-14-done 142020\ysl-打标.xlsx",
+        help="Input Excel file",
+    )
+    parser.add_argument(
+        "--image-dir",
+        default=r"D:\研究生\论文\女性广告\PythonProject1\小红书女性人像筛选结果\ysl_2026-04-14-done 142020\下载图片",
+        help="Local image folder",
+    )
+    parser.add_argument(
+        "--output-dir",
+        default=r"D:\研究生\论文\女性广告\PythonProject1\小红书女性人像筛选结果\ysl_2026-04-14-done 142020\LLM主体性标注结果",
+        help="Output folder",
+    )
+
+    parser.add_argument("--sheet-name", default=None, help="Excel sheet name; default is first sheet")
+    parser.add_argument("--match-col", default=None, help="Column used to match image filenames")
+    parser.add_argument("--model", default=DEFAULT_MODEL, help="Model name")
+    parser.add_argument("--temperature", type=float, default=DEFAULT_TEMPERATURE, help="Sampling temperature")
+    parser.add_argument("--max-tokens", type=int, default=DEFAULT_MAX_TOKENS, help="Max completion tokens")
+    parser.add_argument("--retry-times", type=int, default=DEFAULT_RETRY_TIMES, help="Retry count after first failure")
+    parser.add_argument("--openrouter-referer", default="", help="Optional HTTP Referer header")
+    parser.add_argument("--openrouter-title", default="female-subjectivity-labeler", help="Optional X-Title header")
+    parser.add_argument("--output-prefix", default=None, help="Output file prefix; defaults to input Excel stem")
+
+    return parser.parse_args()
+
+
+def setup_logging(output_dir: Path) -> Path:
+    output_dir.mkdir(parents=True, exist_ok=True)
+    log_path = output_dir / "run.log"
+
+    logger = logging.getLogger()
+    logger.setLevel(logging.INFO)
+    logger.handlers.clear()
+
+    formatter = logging.Formatter("%(asctime)s | %(levelname)s | %(message)s")
+
+    file_handler = logging.FileHandler(log_path, encoding="utf-8")
+    file_handler.setFormatter(formatter)
+    logger.addHandler(file_handler)
+
+    stream_handler = logging.StreamHandler(sys.stdout)
+    stream_handler.setFormatter(formatter)
+    logger.addHandler(stream_handler)
+
+    return log_path
+
+
+def read_excel_dataframe(excel_path: Path, sheet_name: Optional[str]) -> pd.DataFrame:
+    if sheet_name:
+        return pd.read_excel(excel_path, sheet_name=sheet_name)
+    return pd.read_excel(excel_path)
+
+
+def find_column(
+    df: pd.DataFrame,
+    explicit: Optional[str],
+    candidates: Sequence[str],
+    kind: str,
+) -> str:
+    if explicit:
+        if explicit not in df.columns:
+            raise KeyError(f"Cannot find {kind} column '{explicit}'. Available columns: {df.columns.tolist()}")
+        return explicit
+
+    lowered = {str(col).strip().lower(): col for col in df.columns}
+
+    for candidate in candidates:
+        for lowered_name, original in lowered.items():
+            if candidate.lower() in lowered_name:
+                return original
+
+    raise KeyError(f"Cannot auto-detect {kind} column. Available columns: {df.columns.tolist()}")
+
+
+def sanitize_value(value) -> str:
+    if pd.isna(value):
+        return ""
+    return str(value).strip()
+
+
+def normalize_text_for_match(text: str) -> str:
+    return text.casefold().strip()
+
+
+def extract_match_candidates(raw_value) -> List[str]:
+    """
+    Extract the clean image key from the Excel match column.
+
+    Example:
+    Excel value:
+        6439a70a0000000011011fe9_2?xsec_token=xxx&xsec_source=pc_user
+
+    Clean key:
+        6439a70a0000000011011fe9_2
+
+    This clean key will be matched against local image filenames such as:
+        兰蔻_6439a70a0000000011011fe9_2.jpg
+    """
+    text = sanitize_value(raw_value)
+    if not text:
+        return []
+
+    cleaned = text.split("?")[0].split("#")[0].strip()
+    cleaned = cleaned.replace("\\", "/").rsplit("/", 1)[-1].strip()
+    cleaned = Path(cleaned).stem
+
+    if not cleaned:
+        return []
+
+    return [cleaned]
+
+
+def list_image_files(image_dir: Path) -> List[Path]:
+    files = []
+
+    for path in image_dir.rglob("*"):
+        if path.is_file() and path.suffix.lower() in IMAGE_EXTENSIONS:
+            files.append(path)
+
+    return sorted(files)
+
+
+def match_images_to_rows(df: pd.DataFrame, match_col: str, image_dir: Path) -> List[Task]:
+    image_files = list_image_files(image_dir)
+
+    if not image_files:
+        raise FileNotFoundError(f"No image files found under {image_dir}")
+
+    indexed_images = []
+    for path in image_files:
+        indexed_images.append(
+            {
+                "path": path,
+                "path_text": normalize_text_for_match(str(path)),
+                "name_text": normalize_text_for_match(path.name),
+                "stem_text": normalize_text_for_match(path.stem),
+            }
+        )
+
+    assigned: Dict[str, Task] = {}
+    missing_rows: List[int] = []
+
+    for row_index, row in df.iterrows():
+        match_value = sanitize_value(row.get(match_col))
+
+        if not match_value:
+            missing_rows.append(int(row_index))
+            continue
+
+        candidates = [normalize_text_for_match(candidate) for candidate in extract_match_candidates(match_value)]
+        candidates = [candidate for candidate in candidates if candidate]
+
+        matched_paths: List[Path] = []
+        seen_paths = set()
+
+        for candidate in candidates:
+            for item in indexed_images:
+                path = item["path"]
+
+                if path in seen_paths:
+                    continue
+
+                stem_text = item["stem_text"]
+                name_text = item["name_text"]
+                path_text = item["path_text"]
+
+                if stem_text.endswith(candidate) or f"_{candidate}" in stem_text:
+                    matched_paths.append(path)
+                    seen_paths.add(path)
+                    continue
+
+                if candidate in name_text or candidate in path_text:
+                    matched_paths.append(path)
+                    seen_paths.add(path)
+
+        if not matched_paths:
+            logging.warning(
+                "Row %s matched no images. key=%s | candidates=%s",
+                row_index,
+                match_value,
+                candidates,
+            )
+            continue
+
+        if len(matched_paths) > 1:
+            logging.warning(
+                "Row %s matched multiple images. key=%s | candidates=%s | matched=%s",
+                row_index,
+                match_value,
+                candidates,
+                [p.name for p in matched_paths],
+            )
+
+        for path in matched_paths:
+            source_path = str(path.resolve())
+
+            task = Task(
+                source_path=source_path,
+                image_name=path.name,
+                match_key=match_value,
+                row_index=int(row_index),
+            )
+
+            if source_path not in assigned:
+                assigned[source_path] = task
+            else:
+                prev = assigned[source_path]
+                logging.warning(
+                    "Duplicate image matched: %s | previous row=%s | current row=%s",
+                    path.name,
+                    prev.row_index,
+                    row_index,
+                )
+
+    if missing_rows:
+        logging.warning("%d rows had empty match keys.", len(missing_rows))
+
+    tasks = list(assigned.values())
+    tasks.sort(key=lambda item: item.image_name.lower())
+
+    return tasks
+
+
+def ensure_rgb_bytes(image_path: Path) -> bytes:
+    from PIL import Image, ImageOps
+    import io
+
+    try:
+        resample_lanczos = Image.Resampling.LANCZOS
+    except AttributeError:
+        resample_lanczos = Image.LANCZOS
+
+    with Image.open(image_path) as img:
+        img = ImageOps.exif_transpose(img)
+
+        if img.mode != "RGB":
+            img = img.convert("RGB")
+
+        max_side = 1600
+        if max(img.size) > max_side:
+            scale = max_side / float(max(img.size))
+            new_size = (
+                max(1, int(img.width * scale)),
+                max(1, int(img.height * scale)),
+            )
+            img = img.resize(new_size, resample=resample_lanczos)
+
+        buffer = io.BytesIO()
+        img.save(buffer, format="JPEG", quality=92)
+
+        return buffer.getvalue()
+
+
+def image_bytes_to_data_uri(image_bytes: bytes) -> str:
+    encoded = base64.b64encode(image_bytes).decode("ascii")
+    return f"data:image/jpeg;base64,{encoded}"
+
+
+def build_payload(model: str, image_data_uri: str, temperature: float, max_tokens: int) -> Dict:
+    user_text = (
+        "Please evaluate the female subjectivity shown in this advertising image "
+        "based on the scoring rules above. Return JSON only. "
+        "Use a 1-7 continuous score with one decimal place and keep the rationale short."
+    )
+
+    return {
+        "model": model,
+        "temperature": temperature,
+        "max_tokens": max_tokens,
+        "messages": [
+            {
+                "role": "system",
+                "content": SYSTEM_PROMPT,
+            },
+            {
+                "role": "user",
+                "content": [
+                    {
+                        "type": "text",
+                        "text": user_text,
+                    },
+                    {
+                        "type": "image_url",
+                        "image_url": {
+                            "url": image_data_uri,
+                        },
+                    },
+                ],
+            },
+        ],
+    }
+
+
+def parse_model_json(text: str) -> Dict:
+    if not text:
+        raise ValueError("Empty model output.")
+
+    text = re.sub(r"```json|```", "", text, flags=re.I).strip()
+
+    m = re.search(r"\{.*\}", text, flags=re.S)
+    if not m:
+        raise ValueError(f"Cannot locate JSON in model output: {text[:300]}")
+
+    data = json.loads(m.group(0))
+
+    if not isinstance(data, dict):
+        raise ValueError("Model output JSON is not an object.")
+
+    return data
+
+
+def normalize_prediction(data: Dict) -> Dict:
+    continuous = data.get("continuous_score", None)
+    confidence = data.get("confidence", 0)
+    rationale = data.get("rationale", "")
+
+    if continuous is None:
+        continuous_score = None
+    else:
+        try:
+            continuous_score = round(float(continuous), 1)
+        except Exception:
+            continuous_score = None
+
+    if continuous_score is not None:
+        if continuous_score < 1 or continuous_score > 7:
+            continuous_score = None
+
+    try:
+        confidence_value = float(confidence)
+    except Exception:
+        confidence_value = 0.0
+
+    confidence_value = max(0.0, min(1.0, confidence_value))
+
+    if rationale is None:
+        rationale_text = ""
+    else:
+        rationale_text = str(rationale).strip()
+
+    return {
+        "continuous_score": continuous_score,
+        "confidence": confidence_value,
+        "rationale": rationale_text,
+    }
+
+
+def call_openrouter(
+    api_key: str,
+    model: str,
+    image_path: Path,
+    temperature: float,
+    max_tokens: int,
+    openrouter_referer: str,
+    openrouter_title: str,
+    retry_times: int,
+) -> Dict:
+    if not api_key:
+        raise ValueError("Missing API key. Please paste your API key into main().")
+
+    image_bytes = ensure_rgb_bytes(image_path)
+    image_data_uri = image_bytes_to_data_uri(image_bytes)
+    payload = build_payload(model, image_data_uri, temperature, max_tokens)
+
+    headers = {
+        "Authorization": f"Bearer {api_key}",
+        "Content-Type": "application/json",
+    }
+
+    if openrouter_referer:
+        headers["HTTP-Referer"] = openrouter_referer
+
+    if openrouter_title:
+        headers["X-Title"] = openrouter_title
+
+    last_error = None
+    attempts = max(1, int(retry_times) + 1)
+
+    for attempt in range(1, attempts + 1):
+        try:
+            response = requests.post(
+                OPENROUTER_CHAT_URL,
+                headers=headers,
+                json=payload,
+                timeout=90,
+            )
+            response.raise_for_status()
+
+            data = response.json()
+            choices = data.get("choices") or []
+
+            if not choices:
+                raise ValueError(f"No choices in response: {data}")
+
+            message = choices[0].get("message", {})
+            content = message.get("content", "")
+
+            if not isinstance(content, str):
+                content = json.dumps(content, ensure_ascii=False)
+
+            parsed = parse_model_json(content)
+            return normalize_prediction(parsed)
+
+        except Exception as exc:
+            last_error = exc
+            logging.warning(
+                "API attempt %s/%s failed for %s: %s",
+                attempt,
+                attempts,
+                image_path.name,
+                exc,
+            )
+
+            if attempt < attempts:
+                time.sleep(2 ** attempt)
+
+    raise RuntimeError(f"OpenRouter call failed for {image_path.name}: {last_error}")
+
+
+def load_checkpoint(checkpoint_path: Path) -> pd.DataFrame:
+    if checkpoint_path.exists():
+        return pd.read_csv(checkpoint_path)
+
+    return pd.DataFrame()
+
+
+def save_checkpoint(checkpoint_path: Path, rows: List[Dict]) -> None:
+    df = pd.DataFrame(rows)
+    df.to_csv(checkpoint_path, index=False, encoding="utf-8-sig")
+
+
+def build_summary_df(checkpoint_df: pd.DataFrame) -> pd.DataFrame:
+    total = len(checkpoint_df)
+
+    if total and "continuous_score" in checkpoint_df.columns:
+        scored = int(checkpoint_df["continuous_score"].notna().sum())
+    else:
+        scored = 0
+
+    error_count = 0
+    if "error_message" in checkpoint_df.columns:
+        error_series = checkpoint_df["error_message"].fillna("").astype(str)
+        error_count = int((error_series.str.strip() != "").sum())
+
+    summary_rows = [
+        {
+            "metric": "n_images",
+            "value": total,
+        },
+        {
+            "metric": "n_with_continuous_score",
+            "value": scored,
+        },
+        {
+            "metric": "n_errors",
+            "value": error_count,
+        },
+    ]
+
+    return pd.DataFrame(summary_rows)
+
+
+def write_outputs(
+    output_dir: Path,
+    prefix: str,
+    input_df: pd.DataFrame,
+    checkpoint_df: pd.DataFrame,
+) -> Tuple[Path, Path, Path]:
+    result_csv = output_dir / f"{prefix}_predictions.csv"
+    result_xlsx = output_dir / f"{prefix}_predictions.xlsx"
+    summary_csv = output_dir / f"{prefix}_summary.csv"
+
+    annotated_df = input_df.copy()
+
+    annotated_df["LLM_image"] = ""
+    annotated_df["LLM_continuous_score"] = pd.NA
+    annotated_df["LLM_confidence"] = pd.NA
+    annotated_df["LLM_rationale"] = ""
+    annotated_df["LLM_error_message"] = ""
+
+    for _, row in checkpoint_df.iterrows():
+        row_index = row.get("row_index")
+
+        if pd.isna(row_index):
+            continue
+
+        row_index = int(row_index)
+
+        if row_index not in annotated_df.index:
+            continue
+
+        annotated_df.loc[row_index, "LLM_image"] = row.get("image", "")
+        annotated_df.loc[row_index, "LLM_continuous_score"] = row.get("continuous_score", pd.NA)
+        annotated_df.loc[row_index, "LLM_confidence"] = row.get("confidence", pd.NA)
+        annotated_df.loc[row_index, "LLM_rationale"] = row.get("rationale", "")
+        annotated_df.loc[row_index, "LLM_error_message"] = row.get("error_message", "")
+
+    summary_df = build_summary_df(checkpoint_df)
+
+    annotated_df.to_csv(result_csv, index=False, encoding="utf-8-sig")
+    summary_df.to_csv(summary_csv, index=False, encoding="utf-8-sig")
+
+    with pd.ExcelWriter(result_xlsx, engine="openpyxl") as writer:
+        annotated_df.to_excel(writer, sheet_name="input_with_llm_annotations", index=False)
+        summary_df.to_excel(writer, sheet_name="summary", index=False)
+        checkpoint_df.to_excel(writer, sheet_name="evaluation_pairs", index=False)
+
+    return result_csv, result_xlsx, summary_csv
+
+
+def main() -> None:
+    api_key = ""
+
+    args = parse_args()
+
+    input_excel = Path(args.input_excel)
+    image_dir = Path(args.image_dir)
+    output_dir = Path(args.output_dir)
+
+    output_dir.mkdir(parents=True, exist_ok=True)
+    setup_logging(output_dir)
+
+    if not input_excel.exists():
+        raise FileNotFoundError(f"Input Excel not found: {input_excel}")
+
+    if not image_dir.exists():
+        raise FileNotFoundError(f"Image directory not found: {image_dir}")
+
+    prefix = args.output_prefix or input_excel.stem
+
+    checkpoint_path = output_dir / f"{prefix}_checkpoint.csv"
+    error_log_path = output_dir / f"{prefix}_errors.csv"
+
+    df = read_excel_dataframe(input_excel, args.sheet_name)
+    match_col = find_column(df, args.match_col, DEFAULT_MATCH_CANDIDATES, "match key")
+
+    logging.info("Input rows: %s", len(df))
+    logging.info("Using match column: %s", match_col)
+
+    tasks = match_images_to_rows(df, match_col, image_dir)
+    logging.info("Matched unique images: %s", len(tasks))
+
+    checkpoint_df = load_checkpoint(checkpoint_path)
+
+    if checkpoint_df.empty:
+        checkpoint_rows: List[Dict] = []
+    else:
+        checkpoint_rows = checkpoint_df.to_dict(orient="records")
+
+    processed_paths = set()
+
+    if not checkpoint_df.empty and "source_path" in checkpoint_df.columns:
+        processed_paths = set(checkpoint_df["source_path"].dropna().astype(str).tolist())
+
+    logging.info("Already processed images: %s", len(processed_paths))
+
+    errors: List[Dict] = []
+
+    for index, task in enumerate(tasks, start=1):
+        if task.source_path in processed_paths:
+            logging.info("Skip %s (%s/%s)", task.image_name, index, len(tasks))
+            continue
+
+        image_path = Path(task.source_path)
+
+        logging.info("Processing %s (%s/%s)", task.image_name, index, len(tasks))
+
+        try:
+            prediction = call_openrouter(
+                api_key=api_key,
+                model=args.model,
+                image_path=image_path,
+                temperature=args.temperature,
+                max_tokens=args.max_tokens,
+                openrouter_referer=args.openrouter_referer,
+                openrouter_title=args.openrouter_title,
+                retry_times=args.retry_times,
+            )
+
+            row = {
+                "source_path": task.source_path,
+                "image": task.image_name,
+                "match_key": task.match_key,
+                "row_index": task.row_index,
+                "continuous_score": prediction["continuous_score"],
+                "confidence": prediction["confidence"],
+                "rationale": prediction["rationale"],
+                "error_message": "",
+            }
+
+            checkpoint_rows.append(row)
+            processed_paths.add(task.source_path)
+
+            time.sleep(0.8)
+
+        except Exception as exc:
+            error_message = str(exc)
+
+            logging.exception("Failed on %s", task.image_name)
+
+            error_row = {
+                "source_path": task.source_path,
+                "image": task.image_name,
+                "match_key": task.match_key,
+                "row_index": task.row_index,
+                "continuous_score": None,
+                "confidence": 0.0,
+                "rationale": "",
+                "error_message": error_message,
+            }
+
+            errors.append(error_row)
+            checkpoint_rows.append(error_row)
+
+        save_checkpoint(checkpoint_path, checkpoint_rows)
+
+    if errors:
+        pd.DataFrame(errors).to_csv(error_log_path, index=False, encoding="utf-8-sig")
+        logging.info("Wrote error log: %s", error_log_path)
+
+    checkpoint_df = pd.DataFrame(checkpoint_rows)
+
+    if checkpoint_df.empty:
+        logging.warning("No images were processed, nothing to export.")
+        return
+
+    checkpoint_df["continuous_score"] = pd.to_numeric(
+        checkpoint_df.get("continuous_score"),
+        errors="coerce",
+    )
+
+    checkpoint_df["confidence"] = pd.to_numeric(
+        checkpoint_df.get("confidence"),
+        errors="coerce",
+    ).fillna(0.0)
+
+    checkpoint_df["rationale"] = checkpoint_df.get("rationale", "").fillna("").astype(str)
+    checkpoint_df["image"] = checkpoint_df.get("image", "").fillna("").astype(str)
+
+    if "error_message" not in checkpoint_df.columns:
+        checkpoint_df["error_message"] = ""
+
+    result_csv, result_xlsx, summary_csv = write_outputs(
+        output_dir=output_dir,
+        prefix=prefix,
+        input_df=df,
+        checkpoint_df=checkpoint_df,
+    )
+
+    logging.info("Final predictions CSV: %s", result_csv)
+    logging.info("Final predictions Excel: %s", result_xlsx)
+    logging.info("Summary CSV: %s", summary_csv)
+    logging.info("Checkpoint CSV: %s", checkpoint_path)
+
+
+if __name__ == "__main__":
+    main()
