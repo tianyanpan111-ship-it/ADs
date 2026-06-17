@@ -1,0 +1,121 @@
+import pandas as pd
+import pingouin as pg
+from scipy.stats import pearsonr, spearmanr
+
+# 读取 Excel
+df = pd.read_excel(
+    r""
+)
+
+# 取人工均分和 LLM 分数
+# 假设你 Excel 第5列是人工平均分，第7列是 LLM continuous score
+ratings = df.iloc[:, [4, 9]].copy()
+
+# 删除缺失
+ratings = ratings.dropna()
+
+# 重命名
+ratings.columns = ["Human", "LLM"]
+
+# ---------- ICC ----------
+# 转成长格式
+long_df = ratings.reset_index().melt(
+    id_vars="index",
+    var_name="Rater",
+    value_name="Score"
+)
+long_df.columns = ["Target", "Rater", "Score"]
+
+# ICC
+icc = pg.intraclass_corr(
+    data=long_df,
+    targets="Target",
+    raters="Rater",
+    ratings="Score"
+)
+print("=== ICC ===")
+print(icc[['Type','ICC','CI95%']])
+
+# ---------- Pearson & Spearman correlation ----------
+pearson_r, pearson_p = pearsonr(ratings['Human'], ratings['LLM'])
+spearman_rho, spearman_p = spearmanr(ratings['Human'], ratings['LLM'])
+
+print("\n=== Correlation ===")
+print(f"Pearson r = {pearson_r:.3f}, p = {pearson_p:.3f}")
+print(f"Spearman ρ = {spearman_rho:.3f}, p = {spearman_p:.3f}")
+
+# ---------- MAE ----------
+ratings['abs_error'] = (ratings['LLM'] - ratings['Human']).abs()
+mae = ratings['abs_error'].mean()
+
+print("\n=== Mean Absolute Error (MAE) ===")
+print(f"MAE = {mae:.3f}")
+
+# ---------- 最有争议的20张图 ----------
+# ---------- 最有争议的20张图 ----------
+ratings['abs_error'] = (ratings['LLM'] - ratings['Human']).abs()
+
+# 如果你想保留原 Excel 行号方便查看
+ratings['ExcelRow'] = ratings.index + 2
+
+# 排序选前20张
+top30 = ratings.sort_values('abs_error', ascending=False).head(30)
+
+print(top30[['ExcelRow','Human','LLM','abs_error']])
+
+
+
+
+
+
+
+
+# #icc
+# import pandas as pd
+# import pingouin as pg
+
+# # 读取Excel
+# df = pd.read_excel("")
+
+# # 取 C、E、G 三列
+# ratings = df.iloc[:, [4, 6]].copy()
+
+# # 删除缺失
+# ratings = ratings.dropna()
+
+# # 重命名
+# ratings.columns = ["RA1", "RA2"]
+
+# # 转成长格式
+# long_df = ratings.reset_index().melt(
+#     id_vars="index",
+#     var_name="Rater",
+#     value_name="Score"
+# )
+
+# long_df.columns = ["Target", "Rater", "Score"]
+
+# # ICC
+# icc = pg.intraclass_corr(
+#     data=long_df,
+#     targets="Target",
+#     raters="Rater",
+#     ratings="Score"
+# )
+
+# print(icc[['Type','ICC','CI95%']])
+
+# #最有争议的20张图
+# # 找最有争议的20张图
+# #ratings['ExcelRow'] = ratings.index + 2
+# ratings['SD'] = ratings.std(axis=1)
+
+# top20 = ratings.sort_values(
+#     'SD',
+#     ascending=False
+# ).head(20)
+
+# print(top20)
+
+
+
