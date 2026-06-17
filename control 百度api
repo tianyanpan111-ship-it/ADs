@@ -1,0 +1,266 @@
+import os
+from pathlib import Path
+
+import cv2
+import numpy as np
+import pandas as pd
+import requests
+import base64
+from PIL import Image
+
+# =========================
+# 路径
+# =========================
+excel_path = r"D:\研究生\论文\女性广告\PythonProject1\小红书女性人像筛选结果\海飞丝_2026-04-07-llm 115123\LLM主体性标注结果\海飞丝-打标_predictions.xlsx"
+
+image_dir = r"D:\研究生\论文\女性广告\PythonProject1\小红书女性人像筛选结果\海飞丝_2026-04-07-llm 115123\下载图片"
+
+output_path = r"D:\研究生\论文\女性广告\PythonProject1\小红书女性人像筛选结果\海飞丝_2026-04-07-llm 115123\controls_baidu_face.xlsx"
+
+control_cols = [
+    "face_ratio",
+    "brightness",
+    "colorfulness",
+    "contrast",
+    "visual_complexity",
+    "background_complexity",
+    "image_resolution",
+    "skin_exposure",
+]
+
+
+# =========================
+# 百度API配置
+# =========================
+API_KEY = ""
+SECRET_KEY = ""
+
+access_token = None
+
+
+# =========================
+# 获取token
+# =========================
+def get_token():
+    global access_token
+
+    url = "https://aip.baidubce.com/oauth/2.0/token"
+    params = {
+        "grant_type": "client_credentials",
+        "client_id": API_KEY,
+        "client_secret": SECRET_KEY
+    }
+
+    res = requests.get(url, params=params, timeout=15)
+    res.raise_for_status()
+    data = res.json()
+
+    if "access_token" not in data:
+        raise ValueError(f"获取百度 access_token 失败: {data}")
+
+    access_token = data["access_token"]
+
+
+# =========================
+# 百度 face_ratio（核心替换）
+# =========================
+def baidu_face_ratio(img_path):
+
+    global access_token
+    if access_token is None:
+        get_token()
+
+    with open(img_path, "rb") as f:
+        img_base64 = base64.b64encode(f.read()).decode()
+
+    url = f"https://aip.baidubce.com/rest/2.0/face/v3/detect?access_token={access_token}"
+
+    payload = {
+        "image": img_base64,
+        "image_type": "BASE64",
+        "face_field": "location",
+        "max_face_num": 10
+    }
+
+    try:
+        headers = {"Content-Type": "application/json"}
+        res = requests.post(url, headers=headers, json=payload, timeout=20)
+        res.raise_for_status()
+        data = res.json()
+
+        if data.get("error_code", 0) != 0:
+            return np.nan
+
+        faces = data["result"]["face_list"]
+
+        img = Image.open(img_path)
+        w, h = img.size
+
+        total_face_area = 0
+
+        for face in faces:
+            loc = face["location"]
+            bw = loc["width"]
+            bh = loc["height"]
+            total_face_area += bw * bh
+
+        return total_face_area / (w * h)
+
+    except:
+        return np.nan
+
+
+# =========================
+# skin exposure（你原来的 OpenCV版本 - 正确保留）
+# =========================
+def skin_exposure(img):
+    hsv = cv2.cvtColor(img, cv2.COLOR_BGR2HSV)
+
+    lower = np.array([0, 30, 60])
+    upper = np.array([25, 180, 255])
+
+    mask = cv2.inRange(hsv, lower, upper)
+
+    return np.sum(mask > 0) / (img.shape[0] * img.shape[1])
+
+
+# =========================
+# 其他CV变量（保持不变）
+# =========================
+def brightness(img):
+    return np.mean(cv2.cvtColor(img, cv2.COLOR_BGR2GRAY))
+
+
+def contrast(img):
+    return np.std(cv2.cvtColor(img, cv2.COLOR_BGR2GRAY))
+
+
+def colorfulness(img):
+    (B, G, R) = cv2.split(img.astype("float"))
+    rg = np.abs(R - G)
+    yb = np.abs(0.5 * (R + G) - B)
+    return np.sqrt(np.std(rg)**2 + np.std(yb)**2)
+
+
+def visual_complexity(img):
+    gray = cv2.cvtColor(img, cv2.COLOR_BGR2GRAY)
+    edges = cv2.Canny(gray, 100, 200)
+    return np.mean(edges)
+
+
+def background_complexity(img):
+    gray = cv2.cvtColor(img, cv2.COLOR_BGR2GRAY)
+    h, w = gray.shape
+    crop = gray[int(h*0.2):int(h*0.8), int(w*0.2):int(w*0.8)]
+    if crop.size == 0:
+        return np.nan
+    edges = cv2.Canny(crop, 100, 200)
+    return np.mean(edges)
+
+
+def image_resolution(img):
+    h, w = img.shape[:2]
+    return h * w
+
+
+# =========================
+# 图片匹配（处理 "_" 问题）
+# =========================
+def normalize_key(text):
+    if pd.isna(text):
+        return []
+
+    stem = Path(str(text).strip()).stem.strip()
+    stem = stem.split("?")[0].split("#")[0]
+    stem = stem.lstrip("_")
+
+    candidates = [stem]
+
+    if "_" in stem:
+        candidates.append(stem.split("_", 1)[1])
+
+    return [candidate for candidate in dict.fromkeys(candidates) if candidate]
+
+
+def build_image_index(image_files):
+    image_index = {}
+
+    for file_path in image_files:
+        stem = Path(file_path).stem
+        for key in (stem, stem.lstrip("_")):
+            if key and key not in image_index:
+                image_index[key] = str(file_path)
+
+    return image_index
+
+
+def match_image(name, image_index):
+    for candidate in normalize_key(name):
+        if candidate in image_index:
+            return image_index[candidate]
+
+    return None
+
+
+def read_image(path):
+    image_data = np.fromfile(path, dtype=np.uint8)
+    if image_data.size == 0:
+        return None
+    return cv2.imdecode(image_data, cv2.IMREAD_COLOR)
+
+
+# =========================
+# load data
+# =========================
+df = pd.read_excel(excel_path)
+image_files = [p.name for p in Path(image_dir).rglob("*") if p.is_file()]
+image_index = build_image_index(image_files)
+
+results = []
+
+
+# =========================
+# main loop
+# =========================
+for i, row in df.iterrows():
+
+    img_name = row["LLM_image"]
+    match = match_image(img_name, image_index)
+
+    feat = row.to_dict()
+
+    if match is None:
+        feat.update({col: np.nan for col in control_cols})
+        results.append(feat)
+        continue
+
+    img_path = os.path.join(image_dir, match)
+    img = read_image(img_path)
+    if img is None:
+        feat.update({col: np.nan for col in control_cols})
+        results.append(feat)
+        continue
+
+    feat.update({
+        "face_ratio": baidu_face_ratio(img_path),
+        "brightness": brightness(img),
+        "colorfulness": colorfulness(img),
+        "contrast": contrast(img),
+        "visual_complexity": visual_complexity(img),
+        "background_complexity": background_complexity(img),
+        "image_resolution": image_resolution(img),
+        "skin_exposure": skin_exposure(img),
+    })
+
+    results.append(feat)
+
+
+# =========================
+# output
+# =========================
+os.makedirs(os.path.dirname(output_path), exist_ok=True)
+out_df = pd.DataFrame(results)
+out_df = out_df.reindex(columns=list(df.columns) + control_cols)
+out_df.to_excel(output_path, index=False)
+
+print("DONE:", output_path)
