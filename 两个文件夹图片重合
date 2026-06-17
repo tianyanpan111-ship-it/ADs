@@ -1,0 +1,62 @@
+from pathlib import Path
+
+# ========= 你改这里 =========
+folder_a = r""
+folder_b = r""
+
+IMAGE_EXTENSIONS = {".jpg", ".jpeg", ".png", ".webp", ".bmp", ".tif", ".tiff", ".gif"}
+
+# ========= 提取 key =========
+def get_keys(folder):
+    keys = set()
+
+    for path in Path(folder).rglob("*"):
+        if path.suffix.lower() not in IMAGE_EXTENSIONS:
+            continue
+
+        # 直接用 stem（不动任何结构）
+        key = path.stem.strip()
+        keys.add(key)
+
+    return keys
+
+
+# ========= 读取两个文件夹 =========
+keys_a = get_keys(folder_a)
+keys_b = get_keys(folder_b)
+
+# ========= 对比 =========
+common = keys_a & keys_b
+only_a = keys_a - keys_b
+only_b = keys_b - keys_a
+
+
+# ========= 输出 =========
+print("\n========== 对比结果 ==========")
+print(f"Folder A 图片数: {len(keys_a)}")
+print(f"Folder B 图片数: {len(keys_b)}")
+
+print(f"\n✅ 重复图片数量: {len(common)}")
+print(f"❌ 只在 A 中: {len(only_a)}")
+print(f"❌ 只在 B 中: {len(only_b)}")
+
+
+# ========= 可选：打印部分示例 =========
+print("\n--- 重复示例（前20个）---")
+for k in list(common)[:20]:
+    print(k)
+
+
+# ========= 可选：保存结果 =========
+out_common = Path(folder_a) / "common_images.txt"
+out_only_a = Path(folder_a) / "only_in_a.txt"
+out_only_b = Path(folder_b) / "only_in_b.txt"
+
+out_common.write_text("\n".join(sorted(common)), encoding="utf-8")
+out_only_a.write_text("\n".join(sorted(only_a)), encoding="utf-8")
+out_only_b.write_text("\n".join(sorted(only_b)), encoding="utf-8")
+
+print("\n已导出：")
+print(out_common)
+print(out_only_a)
+print(out_only_b)
