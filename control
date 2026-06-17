@@ -1,0 +1,229 @@
+import os
+import cv2
+import numpy as np
+import pandas as pd
+
+# =========================
+# 路径
+# =========================
+excel_path = r""
+
+image_dir = r""
+
+output_path = r""
+
+
+# =========================
+# face detector
+# =========================
+face_cascade = cv2.CascadeClassifier(cv2.data.haarcascades + "haarcascade_frontalface_default.xml")
+
+
+# =========================
+# 图片匹配（解决 "_" 缺失问题）
+# =========================
+def normalize_image_name(name):
+    base = os.path.splitext(str(name).strip())[0]
+    candidates = [base]
+
+    if base.startswith("_"):
+        candidates.append(base[1:])
+    if "_" in base:
+        candidates.append(base.split("_", 1)[1])
+
+    return [candidate for candidate in dict.fromkeys(candidates) if candidate]
+
+
+def build_image_index(image_files):
+    image_index = {}
+
+    for file_name in image_files:
+        stem = os.path.splitext(file_name)[0]
+        for key in (stem, stem.lstrip("_")):
+            if key and key not in image_index:
+                image_index[key] = file_name
+
+    return image_index
+
+
+def match_image(name, image_index):
+    for candidate in normalize_image_name(name):
+        if candidate in image_index:
+            return image_index[candidate]
+
+    return None
+
+
+def read_image(path):
+    image_data = np.fromfile(path, dtype=np.uint8)
+    if image_data.size == 0:
+        return None
+    return cv2.imdecode(image_data, cv2.IMREAD_COLOR)
+
+
+# =========================
+# face ratio（MediaPipe）
+# =========================
+def face_ratio(img):
+    h, w = img.shape[:2]
+
+    gray = cv2.cvtColor(img, cv2.COLOR_BGR2GRAY)
+    faces = face_cascade.detectMultiScale(gray, scaleFactor=1.1, minNeighbors=5, minSize=(30, 30))
+
+    if len(faces) == 0:
+        return 0.0
+
+    face_area_total = 0
+
+    for x, y, bw, bh in faces:
+        face_area_total += bw * bh
+
+    return face_area_total / (h * w)
+
+
+# =========================
+# brightness
+# =========================
+def brightness(img):
+    gray = cv2.cvtColor(img, cv2.COLOR_BGR2GRAY)
+    return np.mean(gray)
+
+
+# =========================
+# contrast
+# =========================
+def contrast(img):
+    gray = cv2.cvtColor(img, cv2.COLOR_BGR2GRAY)
+    return np.std(gray)
+
+
+# =========================
+# colorfulness
+# =========================
+def colorfulness(img):
+    (B, G, R) = cv2.split(img.astype("float"))
+    rg = np.abs(R - G)
+    yb = np.abs(0.5 * (R + G) - B)
+    return np.sqrt(np.std(rg)**2 + np.std(yb)**2)
+
+
+# =========================
+# visual complexity
+# =========================
+def visual_complexity(img):
+    gray = cv2.cvtColor(img, cv2.COLOR_BGR2GRAY)
+    edges = cv2.Canny(gray, 100, 200)
+    return np.mean(edges)
+
+
+# =========================
+# background complexity
+# =========================
+def background_complexity(img):
+    gray = cv2.cvtColor(img, cv2.COLOR_BGR2GRAY)
+    h, w = gray.shape
+
+    crop = gray[int(h*0.2):int(h*0.8), int(w*0.2):int(w*0.8)]
+    edges = cv2.Canny(crop, 100, 200)
+
+    return np.mean(edges)
+
+
+# =========================
+# image resolution
+# =========================
+def image_resolution(img):
+    h, w = img.shape[:2]
+    return h * w
+
+
+# =========================
+# skin exposure（HSV）
+# =========================
+def skin_exposure(img):
+    hsv = cv2.cvtColor(img, cv2.COLOR_BGR2HSV)
+
+    lower = np.array([0, 30, 60], dtype=np.uint8)
+    upper = np.array([25, 180, 255], dtype=np.uint8)
+
+    mask = cv2.inRange(hsv, lower, upper)
+    return np.sum(mask > 0) / (img.shape[0] * img.shape[1])
+
+
+# =========================
+# load data
+# =========================
+df = pd.read_excel(excel_path)
+image_files = os.listdir(image_dir)
+image_index = build_image_index(image_files)
+
+results = []
+
+
+# =========================
+# main loop
+# =========================
+for i, row in df.iterrows():
+
+    img_name = str(row["LLM_image"])
+    match = match_image(img_name, image_index)
+
+    if match is None:
+        print("NOT FOUND:", img_name)
+        feat = row.to_dict()
+        feat.update({
+            "face_ratio": np.nan,
+            "brightness": np.nan,
+            "contrast": np.nan,
+            "colorfulness": np.nan,
+            "visual_complexity": np.nan,
+            "background_complexity": np.nan,
+            "image_resolution": np.nan,
+            "skin_exposure": np.nan,
+        })
+        results.append(feat)
+        continue
+
+    path = os.path.join(image_dir, match)
+    img = read_image(path)
+
+    if img is None:
+        feat = row.to_dict()
+        feat.update({
+            "face_ratio": np.nan,
+            "brightness": np.nan,
+            "contrast": np.nan,
+            "colorfulness": np.nan,
+            "visual_complexity": np.nan,
+            "background_complexity": np.nan,
+            "image_resolution": np.nan,
+            "skin_exposure": np.nan,
+        })
+        results.append(feat)
+        continue
+
+    feat = row.to_dict()
+
+    # controls
+    feat.update({
+        "face_ratio": face_ratio(img),
+        "brightness": brightness(img),
+        "contrast": contrast(img),
+        "colorfulness": colorfulness(img),
+        "visual_complexity": visual_complexity(img),
+        "background_complexity": background_complexity(img),
+        "image_resolution": image_resolution(img),
+        "skin_exposure": skin_exposure(img),
+    })
+
+    results.append(feat)
+
+
+# =========================
+# output
+# =========================
+os.makedirs(os.path.dirname(output_path), exist_ok=True)
+out_df = pd.DataFrame(results)
+out_df.to_excel(output_path, index=False)
+
+print("DONE:", output_path)
