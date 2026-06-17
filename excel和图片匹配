@@ -1,0 +1,89 @@
+import pandas as pd
+from pathlib import Path
+import re
+
+# ========= 配置 =========
+excel_path = r""
+image_dir = r""
+
+match_col = "LLM_image"
+
+output_dir = Path(r"")
+
+IMAGE_EXTENSIONS = {".jpg", ".jpeg", ".png", ".webp", ".bmp", ".tif", ".tiff", ".gif"}
+
+
+# ========= 核心：统一 key =========
+def normalize_key(text):
+    if pd.isna(text):
+        return ""
+
+    text = str(text).strip()
+
+    # 去掉 ? 和 # 后面的内容
+    text = text.split("?")[0].split("#")[0]
+
+    # 去掉扩展名
+    stem = Path(text).stem.strip()
+
+    # 关键：忽略开头是否有下划线
+    stem = stem.lstrip("_")
+
+    # 统一最后的 _数字，例如 _8 / _10 / _13
+    match = re.match(r"^(.*)_(\d+)$", stem)
+    if match:
+        prefix = match.group(1)
+        idx = int(match.group(2))
+        return f"{prefix}_{idx}"
+
+    return stem
+
+
+# ========= 1. 读取 Excel =========
+df = pd.read_excel(excel_path, dtype={match_col: str})
+
+if match_col not in df.columns:
+    raise ValueError(f"找不到列 {match_col}，当前列：{df.columns.tolist()}")
+
+excel_keys = set(
+    df[match_col]
+    .dropna()
+    .map(normalize_key)
+)
+
+
+# ========= 2. 扫描图片文件夹 =========
+image_keys = set()
+
+for path in Path(image_dir).rglob("*"):
+    if path.suffix.lower() not in IMAGE_EXTENSIONS:
+        continue
+
+    key = normalize_key(path.stem)
+    image_keys.add(key)
+
+
+# ========= 3. 对比 =========
+missing_in_excel = image_keys - excel_keys
+missing_in_folder = excel_keys - image_keys
+
+
+# ========= 4. 输出结果 =========
+print("\n========== 检查结果 ==========")
+print(f"Excel keys: {len(excel_keys)}")
+print(f"Image keys: {len(image_keys)}")
+
+print(f"\n❌ 文件夹有但 Excel 没有: {len(missing_in_excel)}")
+print(f"❌ Excel 有但文件夹没有: {len(missing_in_folder)}")
+
+
+# ========= 5. 导出 Excel =========
+out1 = output_dir / "missing_in_excel.xlsx"
+out2 = output_dir / "missing_in_folder.xlsx"
+
+pd.DataFrame(sorted(missing_in_excel), columns=["only_in_folder"]).to_excel(out1, index=False)
+pd.DataFrame(sorted(missing_in_folder), columns=["only_in_excel"]).to_excel(out2, index=False)
+
+print("\n已导出结果：")
+print(out1)
+print(out2)
