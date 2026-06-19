@@ -7,40 +7,91 @@ import pandas as pd
 import requests
 import base64
 from PIL import Image
+from tqdm import tqdm
+
 
 # =========================
 # 路径
 # =========================
-excel_path = r"D:\研究生\论文\女性广告\PythonProject1\小红书女性人像筛选结果\海飞丝_2026-04-07-llm 115123\LLM主体性标注结果\海飞丝-打标_predictions.xlsx"
+excel_path = r"D:\研究生\论文\女性广告\PythonProject1\小红书女性人像筛选结果\资生堂_2026-04-23-llm 190300\LLM主体性标注结果\资生堂-打标_predictions.xlsx"
 
-image_dir = r"D:\研究生\论文\女性广告\PythonProject1\小红书女性人像筛选结果\海飞丝_2026-04-07-llm 115123\下载图片"
+image_dir = r"D:\研究生\论文\女性广告\PythonProject1\小红书女性人像筛选结果\资生堂_2026-04-23-llm 190300\下载图片"
 
-output_path = r"D:\研究生\论文\女性广告\PythonProject1\小红书女性人像筛选结果\海飞丝_2026-04-07-llm 115123\controls_baidu_face.xlsx"
+output_path = r"D:\研究生\论文\女性广告\PythonProject1\小红书女性人像筛选结果\资生堂_2026-04-23-llm 190300\资生堂-controls_最终.xlsx"
 
+
+# =========================
+# control variables
+# =========================
 control_cols = [
+    "celebrity",
+    "celebrity_names",
+
+    "抽奖",
+
     "face_ratio",
+    "face_count",
+
     "brightness",
     "colorfulness",
     "contrast",
+
     "visual_complexity",
     "background_complexity",
+
     "image_resolution",
     "skin_exposure",
 ]
 
 
 # =========================
-# 百度API配置
+# celebrity dictionary
 # =========================
+celebrity_names = [
+    "徐月悦", "唐嫣", "libracc", "刘亦菲", "金九粒",
+    "不认识的明星", "郁可唯", "孟佳", "王霏霏", "神仙姐姐",
+    "晴哥粒", "周也", "也子", "小也",
+    "白大飞", "YE VAN", "大洁哥", "深夜徐老师", "吴宣仪",
+    "张小斐", "张家妍", "安妮·海瑟薇", "王玉雯", "张凯莹",
+    "TWINS", "鱼一", "辛芷蕾", "陈丽君", "陈昊宇",
+    "郑合惠子", "白鹿", "李一桐", "倪妮", "舒淇",
+    "卢靖姗", "李沁", "蒋欣", "刘浩存", "林允",
+    "李兰迪", "陆柯燃", "张小婉", "王曼昱", "IU",
+    "外国明星", "易梦玲", "吉克隽逸", "「存」", "梦玲",
+    "MIYEON", "曺薇娟", "王楚然", "佟丽娅",
+    "妤Yuki", "晓卉", "叶童", "朱珠", "唐艺昕",
+    "欧阳娣娣", "王玉雯", "张俪", 
+    "陈昊宇", "高叶", "李一桐" 
+]
+
+
+# =========================
+# 抽奖 / 福利检测
+# =========================
+def detect_lottery(title, content):
+    text = ""
+
+    if pd.notna(title):
+        text += str(title)
+
+    if pd.notna(content):
+        text += str(content)
+
+    keywords = ["宠粉", "福利", "抽奖", "惊喜盒子", "免费领", "🎁"]
+
+    return 1 if any(k in text for k in keywords) else 0
+
+
+# =========================
+# 百度 API
+# =========================
+# 注意：这里填你自己的百度 API_KEY 和 SECRET_KEY
 API_KEY = ""
 SECRET_KEY = ""
 
 access_token = None
 
 
-# =========================
-# 获取token
-# =========================
 def get_token():
     global access_token
 
@@ -55,14 +106,32 @@ def get_token():
     res.raise_for_status()
     data = res.json()
 
-    if "access_token" not in data:
-        raise ValueError(f"获取百度 access_token 失败: {data}")
-
     access_token = data["access_token"]
 
 
 # =========================
-# 百度 face_ratio（核心替换）
+# celebrity detection
+# =========================
+def detect_celebrity(title, content):
+
+    text = ""
+
+    if pd.notna(title):
+        text += str(title)
+
+    if pd.notna(content):
+        text += str(content)
+
+    matched = [name for name in celebrity_names if name in text]
+
+    if matched:
+        return 1, "；".join(matched)
+    else:
+        return 0, None
+
+
+# =========================
+# face detection (Baidu)
 # =========================
 def baidu_face_ratio(img_path):
 
@@ -83,49 +152,34 @@ def baidu_face_ratio(img_path):
     }
 
     try:
-        headers = {"Content-Type": "application/json"}
-        res = requests.post(url, headers=headers, json=payload, timeout=20)
-        res.raise_for_status()
+        res = requests.post(url, json=payload, timeout=20)
         data = res.json()
 
         if data.get("error_code", 0) != 0:
-            return np.nan
+            return np.nan, np.nan
 
         faces = data["result"]["face_list"]
 
         img = Image.open(img_path)
         w, h = img.size
 
-        total_face_area = 0
+        total_area = 0
+        face_count = len(faces)
 
         for face in faces:
             loc = face["location"]
             bw = loc["width"]
             bh = loc["height"]
-            total_face_area += bw * bh
+            total_area += bw * bh
 
-        return total_face_area / (w * h)
+        return total_area / (w * h), face_count
 
-    except:
-        return np.nan
-
-
-# =========================
-# skin exposure（你原来的 OpenCV版本 - 正确保留）
-# =========================
-def skin_exposure(img):
-    hsv = cv2.cvtColor(img, cv2.COLOR_BGR2HSV)
-
-    lower = np.array([0, 30, 60])
-    upper = np.array([25, 180, 255])
-
-    mask = cv2.inRange(hsv, lower, upper)
-
-    return np.sum(mask > 0) / (img.shape[0] * img.shape[1])
+    except Exception:
+        return np.nan, np.nan
 
 
 # =========================
-# 其他CV变量（保持不变）
+# CV features
 # =========================
 def brightness(img):
     return np.mean(cv2.cvtColor(img, cv2.COLOR_BGR2GRAY))
@@ -139,9 +193,12 @@ def colorfulness(img):
     (B, G, R) = cv2.split(img.astype("float"))
     rg = np.abs(R - G)
     yb = np.abs(0.5 * (R + G) - B)
-    return np.sqrt(np.std(rg)**2 + np.std(yb)**2)
+    return np.sqrt(np.std(rg) ** 2 + np.std(yb) ** 2)
 
 
+# =========================
+# ORIGINAL complexity (Canny version)
+# =========================
 def visual_complexity(img):
     gray = cv2.cvtColor(img, cv2.COLOR_BGR2GRAY)
     edges = cv2.Canny(gray, 100, 200)
@@ -151,26 +208,43 @@ def visual_complexity(img):
 def background_complexity(img):
     gray = cv2.cvtColor(img, cv2.COLOR_BGR2GRAY)
     h, w = gray.shape
-    crop = gray[int(h*0.2):int(h*0.8), int(w*0.2):int(w*0.8)]
-    if crop.size == 0:
-        return np.nan
+
+    crop = gray[int(h * 0.2):int(h * 0.8), int(w * 0.2):int(w * 0.8)]
     edges = cv2.Canny(crop, 100, 200)
+
     return np.mean(edges)
 
 
+# =========================
+# image resolution
+# =========================
 def image_resolution(img):
     h, w = img.shape[:2]
     return h * w
 
 
 # =========================
-# 图片匹配（处理 "_" 问题）
+# skin exposure
+# =========================
+def skin_exposure(img):
+    hsv = cv2.cvtColor(img, cv2.COLOR_BGR2HSV)
+
+    lower = np.array([0, 30, 60])
+    upper = np.array([25, 180, 255])
+
+    mask = cv2.inRange(hsv, lower, upper)
+
+    return np.sum(mask > 0) / (img.shape[0] * img.shape[1])
+
+
+# =========================
+# image matching
 # =========================
 def normalize_key(text):
     if pd.isna(text):
         return []
 
-    stem = Path(str(text).strip()).stem.strip()
+    stem = Path(str(text).strip()).stem
     stem = stem.split("?")[0].split("#")[0]
     stem = stem.lstrip("_")
 
@@ -179,7 +253,7 @@ def normalize_key(text):
     if "_" in stem:
         candidates.append(stem.split("_", 1)[1])
 
-    return [candidate for candidate in dict.fromkeys(candidates) if candidate]
+    return list(dict.fromkeys(candidates))
 
 
 def build_image_index(image_files):
@@ -187,9 +261,8 @@ def build_image_index(image_files):
 
     for file_path in image_files:
         stem = Path(file_path).stem
-        for key in (stem, stem.lstrip("_")):
-            if key and key not in image_index:
-                image_index[key] = str(file_path)
+        image_index[stem] = str(file_path)
+        image_index[stem.lstrip("_")] = str(file_path)
 
     return image_index
 
@@ -198,7 +271,6 @@ def match_image(name, image_index):
     for candidate in normalize_key(name):
         if candidate in image_index:
             return image_index[candidate]
-
     return None
 
 
@@ -213,41 +285,82 @@ def read_image(path):
 # load data
 # =========================
 df = pd.read_excel(excel_path)
-image_files = [p.name for p in Path(image_dir).rglob("*") if p.is_file()]
+
+image_files = [str(p) for p in Path(image_dir).rglob("*") if p.is_file()]
 image_index = build_image_index(image_files)
 
 results = []
 
+print("Excel 行数:", len(df))
+print("图片文件数:", len(image_files))
+print("开始处理……")
+
 
 # =========================
-# main loop
+# main loop with progress bar
 # =========================
-for i, row in df.iterrows():
+for _, row in tqdm(df.iterrows(), total=len(df), desc="Processing images"):
 
     img_name = row["LLM_image"]
     match = match_image(img_name, image_index)
 
     feat = row.to_dict()
 
+    # =========================
+    # text controls
+    # =========================
+    title = row.get("标题", None)
+    content = row.get("正文文案", None)
+
+    # celebrity
+    celeb_flag, celeb_names = detect_celebrity(title, content)
+
+    feat["celebrity"] = celeb_flag
+    feat["celebrity_names"] = celeb_names
+
+    # 抽奖：标题或正文文案中出现“宠粉”“福利”则为1，否则为0
+    feat["抽奖"] = detect_lottery(title, content)
+
+    # =========================
+    # if image not found
+    # =========================
     if match is None:
-        feat.update({col: np.nan for col in control_cols})
+        for c in control_cols:
+            if c not in ["celebrity", "celebrity_names", "抽奖"]:
+                feat[c] = np.nan
+
         results.append(feat)
         continue
 
-    img_path = os.path.join(image_dir, match)
-    img = read_image(img_path)
+    img = read_image(match)
+
+    # =========================
+    # if image cannot be read
+    # =========================
     if img is None:
-        feat.update({col: np.nan for col in control_cols})
+        for c in control_cols:
+            if c not in ["celebrity", "celebrity_names", "抽奖"]:
+                feat[c] = np.nan
+
         results.append(feat)
         continue
+
+    # =========================
+    # image controls
+    # =========================
+    face_ratio, face_count = baidu_face_ratio(match)
 
     feat.update({
-        "face_ratio": baidu_face_ratio(img_path),
+        "face_ratio": face_ratio,
+        "face_count": face_count,
+
         "brightness": brightness(img),
         "colorfulness": colorfulness(img),
         "contrast": contrast(img),
+
         "visual_complexity": visual_complexity(img),
         "background_complexity": background_complexity(img),
+
         "image_resolution": image_resolution(img),
         "skin_exposure": skin_exposure(img),
     })
@@ -259,8 +372,12 @@ for i, row in df.iterrows():
 # output
 # =========================
 os.makedirs(os.path.dirname(output_path), exist_ok=True)
+
 out_df = pd.DataFrame(results)
+
+# 保证输出列顺序：原始列 + control列
 out_df = out_df.reindex(columns=list(df.columns) + control_cols)
+
 out_df.to_excel(output_path, index=False)
 
 print("DONE:", output_path)
