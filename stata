@@ -1,0 +1,118 @@
+import excel "D:\研究生\论文\女性广告\机器学习\首图合集.xlsx", firstrow clear
+rename 发布时间 date
+*识别时间
+gen date2 = daily(date, "YMD")
+replace date2 = daily(date, "DMY") if missing(date2)
+format date2 %td
+*提取年月
+gen month = mofd(date2)
+format month %tm
+gen year = year(date2)
+
+rename 作者 brand
+rename 点赞数 likes
+
+*log自变量
+gen log_likes = log(likes + 1)
+
+encode brand, gen(brand_id)
+
+*哑变量
+gen type = (笔记类型 == "视频")
+
+destring LLM_continuous_score, replace force
+
+*找缺失值
+list if missing(LLM_continuous_score)
+
+reg log_likes LLM_continuous_score celebrity face_ratio brightness colorfulness contrast visual_complexity background_complexity image_resolution skin_exposure i.brand_id i.month, vce(cluster brand_id)
+
+
+*完整-首图合集
+import excel "D:\研究生\论文\女性广告\机器学习\首图合集.xlsx", firstrow clear
+rename 发布时间 date
+*识别时间
+gen date2 = daily(date, "YMD")
+replace date2 = daily(date, "DMY") if missing(date2)
+format date2 %td
+*提取年月
+gen month = mofd(date2)
+list if missing(date2)
+format month %tm
+gen year = year(date2)
+rename 作者 brand
+*log自变量
+gen log_likes = log(likes + 1)
+encode brand, gen(brand_id)
+gen type = (笔记类型 == "视频")
+destring LLM_continuous_score, replace force
+list if missing(LLM_continuous_score)
+replace LLM_continuous_score = 3.8 in 3857
+*主回归
+reg likes LLM_continuous_score celebrity face_ratio brightness colorfulness contrast visual_complexity background_complexity image_resolution skin_exposure i.brand_id i.month, vce(cluster brand_id)
+*和celebrity的交互作用
+reg likes c.LLM_continuous_score##i.celebrity face_ratio brightness colorfulness contrast visual_complexity background_complexity image_resolution skin_exposure i.brand_id i.month, vce(cluster brand_id)
+*散点图
+twoway (scatter likes LLM_continuous_score, msize(small)) (lfitci likes LLM_continuous_score)
+*celebrity分组散点图
+twoway (scatter likes LLM_continuous_score if celebrity==0)  (lfit likes LLM_continuous_score if celebrity==0) (scatter likes LLM_continuous_score if celebrity==1) (lfit likes LLM_continuous_score if celebrity==1)
+*outliers压缩极端值robust 
+clonevar likes_w = likes
+winsor2 likes_w, cuts(1 99) replace
+*删除极端值robust
+centile likes, centile(1 99)
+drop if likes < 5 | likes > 14000
+reg likes LLM_continuous_score celebrity face_ratio brightness colorfulness contrast visual_complexity background_complexity image_resolution skin_exposure i.brand_id i.month, vce(cluster brand_id)
+*生成持续时长
+gen days_since_post = 抓取时间 - date2
+gen ln_days = log(days_since_post + 1)
+*生成点赞数/品牌均值点赞数
+bys brand_id: egen mean_likes = mean(likes)
+gen likes_std = likes / mean_likes
+*交互回归结果作图
+reg likes c.LLM_continuous_score##i.celebrity face_ratio face_count brightness colorfulness contrast visual_complexity background_complexity image_resolution skin_exposure i.brand_id i.month, vce(cluster brand_id)
+margins celebrity, at(LLM_continuous_score=(1(1)7))
+marginsplot
+*共线性
+reg LLM_continuous_score celebrity face_ratio brightness colorfulness contrast visual_complexity background_complexity image_resolution skin_exposure
+vif
+
+
+
+
+*完整-帖子平均
+import excel "D:\研究生\论文\女性广告\机器学习\合并excel\合并结果.xlsx", firstrow clear
+rename 发布时间 date
+*识别时间
+gen date2 = daily(date, "YMD")
+replace date2 = daily(date, "DMY") if missing(date2)
+format date2 %td
+*补充缺失值
+replace month = monthly("2026m1","YM") in 7608
+replace month = monthly("2026m1","YM") in 7216
+*提取年月
+gen month = mofd(date2)
+*寻找缺失值并补充
+*list if missing(LLM_continuous_score)
+*replace date2 = date("14jan2026","DMY") in 7216
+*replace date2 = date("14jan2026","DMY") in 7608
+*继续提取年月
+format month %tm
+gen year = year(date2)
+rename 作者 brand
+rename 点赞数 likes
+*log自变量
+gen log_likes = log(likes + 1)
+encode brand, gen(brand_id)
+gen type = (笔记类型 == "视频")
+destring LLM_continuous_score, replace force
+list if missing(LLM_continuous_score)
+replace LLM_continuous_score = 3.8 in 8895
+*主回归
+reg likes LLM_continuous_score celebrity face_ratio brightness colorfulness contrast visual_complexity background_complexity image_resolution skin_exposure i.brand_id i.month, vce(cluster brand_id)
+
+
+*后面可以用stata做帖子均值检验
+collapse (mean) LLM_score brightness contrast colorfulness ///
+face_ratio face_count visual_complexity background_complexity ///
+image_resolution skin_exposure likes celebrity, by(post_id)
