@@ -1,0 +1,46 @@
+import pandas as pd
+import pingouin as pg
+
+# 读取Excel
+df = pd.read_excel("D:我和人工的一致性.xlsx")
+
+# 取B列和C列
+ratings = df.iloc[:, [1, 2]].copy()
+
+
+# 删除缺失
+ratings = ratings.dropna()
+
+# 重命名
+ratings.columns = ["RA_Mean", "Author"]
+
+
+# 转成长格式
+long_df = ratings.reset_index().melt(
+    id_vars="index",
+    var_name="Rater",
+    value_name="Score"
+)
+
+long_df.columns = ["Target", "Rater", "Score"]
+
+# ICC
+icc = pg.intraclass_corr(
+    data=long_df,
+    targets="Target",
+    raters="Rater",
+    ratings="Score"
+)
+
+print(icc[['Type', 'ICC', 'CI95%', 'F', 'pval']])
+
+
+#paerson
+from scipy.stats import pearsonr
+
+r, p = pearsonr(
+    ratings["RA_Mean"],
+    ratings["Author"]
+)
+
+print(f"Pearson r = {r:.3f}, p = {p:.5f}")
