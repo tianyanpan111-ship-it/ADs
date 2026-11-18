@@ -1,0 +1,49 @@
+import pandas as pd
+from pathlib import Path
+
+# =========================
+# 路径
+# =========================
+input_path = r""
+
+output_path = r""
+
+
+# =========================
+# 你自己设置抽样数量
+# =========================
+n = 5   # ←←← 改这里
+
+
+# =========================
+# 读取数据
+# =========================
+df = pd.read_excel(input_path)
+
+# =========================
+# 过滤 celebrity = 1
+# =========================
+celeb_df = df[df["celebrity"] == 1].copy()
+
+print("celebrity=1 总数:", len(celeb_df))
+
+# =========================
+# 检查 n 是否合理
+# =========================
+if n > len(celeb_df):
+    raise ValueError(f"n={n} 超过可用样本数 {len(celeb_df)}")
+
+# =========================
+# 随机抽样（可复现）
+# =========================
+sample_df = celeb_df.sample(n=n, random_state=42)
+
+# =========================
+# 输出
+# =========================
+Path(output_path).parent.mkdir(parents=True, exist_ok=True)
+
+sample_df.to_excel(output_path, index=False)
+
+print("已抽样:", n)
+print("输出路径:", output_path)
