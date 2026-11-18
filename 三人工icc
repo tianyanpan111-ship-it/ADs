@@ -13,6 +13,99 @@ df = pd.read_excel(file_path)
 # =========================
 # 2. 取 C、E、G 三列作为连续评分
 # =========================
+ratings = df.iloc[:, [2, 3, 4]].copy()
+ratings = ratings.dropna()
+ratings.columns = ["RA1", "RA2", "RA3"]
+
+# =========================
+# 3. ICC 计算
+# =========================
+long_df = ratings.reset_index().melt(
+    id_vars="index",
+    var_name="Rater",
+    value_name="Score"
+)
+long_df.columns = ["Target", "Rater", "Score"]
+
+icc = pg.intraclass_corr(
+    data=long_df,
+    targets="Target",
+    raters="Rater",
+    ratings="Score"
+)
+
+print("=== ICC ===")
+print(icc[['Type','ICC','CI95%']])
+
+# =========================
+# 4. 计算 r 和 MAE
+# =========================
+pairs = list(combinations(ratings.columns, 2))
+r_list = []
+mae_list = []
+
+for ra1, ra2 in pairs:
+    # Pearson r
+    r_value, _ = pearsonr(ratings[ra1], ratings[ra2])
+    r_list.append(r_value)
+    
+    # MAE
+    mae_value = mean_absolute_error(ratings[ra1], ratings[ra2])
+    mae_list.append(mae_value)
+
+# 平均 r 和 MAE
+mean_r = sum(r_list)/len(r_list)
+mean_mae = sum(mae_list)/len(mae_list)
+
+print("\n=== Pairwise agreement ===")
+for i, (ra1, ra2) in enumerate(pairs):
+    print(f"{ra1} vs {ra2}: r = {r_list[i]:.3f}, MAE = {mae_list[i]:.3f}")
+
+print(f"\nAverage r = {mean_r:.3f}")
+print(f"Average MAE = {mean_mae:.3f}")
+
+# =========================
+# 5. 找三人分歧最大的 Top 20
+# =========================
+
+ratings["std"] = ratings.std(axis=1)
+ratings["range"] = ratings.max(axis=1) - ratings.min(axis=1)
+
+top20_idx = ratings.sort_values(by="std", ascending=False).head(20).index
+top20 = ratings.loc[top20_idx]
+
+# =========================
+# 6. 终端输出
+# =========================
+
+print("\n==============================")
+print("TOP 20 MOST DISAGREED SAMPLES")
+print("==============================\n")
+
+for i, idx in enumerate(top20_idx, 1):
+    row = ratings.loc[idx]
+
+    print(f"Rank {i} | Sample Index: {idx}")
+    print(f"RA1: {row['RA1']:.2f} | RA2: {row['RA2']:.2f} | RA3: {row['RA3']:.2f}")
+    print(f"STD: {row['std']:.3f} | RANGE: {row['range']:.3f}")
+    print("-" * 50)
+
+看前面：
+import pandas as pd
+import pingouin as pg
+from itertools import combinations
+from sklearn.metrics import mean_absolute_error
+from scipy.stats import pearsonr
+
+# =========================
+# 1. 读取 Excel
+# =========================
+file_path = r""
+df = pd.read_excel(file_path)
+
+# =========================
+# 2. 取 C、E、G 三列作为连续评分
+# =========================
 ratings = df.iloc[:, [2, 4, 6]].copy()
 ratings = ratings.dropna()
 ratings.columns = ["RA1", "RA2", "RA3"]
