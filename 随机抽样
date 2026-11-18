@@ -1,0 +1,112 @@
+import pandas as pd
+import random
+import shutil
+from pathlib import Path
+
+
+# ========== 配置 ==========
+excel_path = r""
+image_folder = r""
+output_excel = r""
+output_image_folder = r""
+
+n = 8  # 抽样数量
+# =========================
+
+
+def clean_img_name(value):
+    """统一清洗图片名或图片路径。"""
+    if pd.isna(value):
+        return ""
+
+    text = str(value).strip()
+    text = Path(text).name
+
+    if not text.startswith("_") and "_" in text:
+        text = "_" + text
+
+    return text
+
+
+def try_find_image(folder, name):
+    """按文件名查找图片，找不到时补常见扩展名。"""
+    candidate = Path(folder) / name
+    if candidate.exists():
+        return candidate
+
+    base = candidate.stem
+    for ext in [".jpg", ".jpeg", ".png", ".webp"]:
+        candidate_with_ext = Path(folder) / (base + ext)
+        if candidate_with_ext.exists():
+            return candidate_with_ext
+
+    return None
+
+
+Path(output_image_folder).mkdir(parents=True, exist_ok=True)
+Path(output_excel).parent.mkdir(parents=True, exist_ok=True)
+
+
+df = pd.read_excel(excel_path)
+
+total_rows = len(df)
+print("数据行数(不含表头):", total_rows)
+
+if "LLM_image" not in df.columns:
+    raise KeyError(f"Excel 中没有找到 LLM_image 列，当前列名：{df.columns.tolist()}")
+
+if n > total_rows:
+    raise ValueError(f"n={n} 大于可抽样的数据行数 {total_rows}")
+
+
+# ===== 1. 随机抽样 =====
+valid_row_numbers = list(range(1, total_rows + 1))
+sample_row_numbers = random.sample(valid_row_numbers, n)
+
+print("抽样行号(1-based, 不含表头):", sample_row_numbers)
+
+
+# ===== 2. 输出 Excel =====
+sample_df = df.iloc[[row_number - 1 for row_number in sample_row_numbers]].copy()
+sample_df.to_excel(output_excel, index=False)
+
+
+# ===== 3. 图片复制 =====
+unmatched = []
+
+for row_number in sample_row_numbers:
+    row = df.iloc[row_number - 1]
+
+    prefix = str(row.iloc[0]).strip()
+    img_name = clean_img_name(row.get("LLM_image", ""))
+
+    if not img_name:
+        unmatched.append((row_number, "EMPTY_LLM_image"))
+        continue
+
+    src_path = try_find_image(image_folder, img_name)
+
+    if src_path is None:
+        unmatched.append((row_number, img_name))
+        print(f"❌ 找不到图片: {img_name}")
+        continue
+
+    new_name = f"{prefix}_{src_path.name.lstrip('_')}"
+    dst_path = Path(output_image_folder) / new_name
+
+    shutil.copy2(src_path, dst_path)
+    print(f"✔ {src_path.name} → {new_name}")
+
+
+# ===== 4. 输出 unmatched report =====
+if unmatched:
+    pd.DataFrame(unmatched, columns=["row", "img"]).to_excel(
+        Path(output_image_folder) / "unmatched.xlsx",
+        index=False,
+    )
+    print("\n⚠️ 有未匹配图片，已输出 unmatched.xlsx")
+
+
+print("\n✅ 完成")
+print("Excel:", output_excel)
+print("Images:", output_image_folder)
