@@ -1,0 +1,51 @@
+import pandas as pd
+from pathlib import Path
+import re
+
+# =========================
+# 路径
+# =========================
+input_path = r"D:.xlsx"
+
+output_path = r"D:\.xlsx"
+
+
+# =========================
+# 读取 Excel
+# =========================
+df = pd.read_excel(input_path)
+
+# =========================
+# 提取 LLM_image 最后一个 _ 后面的数字
+# 例如：_6984627d000000001a03584e_1.jpeg -> 1
+# =========================
+def is_first_image(x):
+    if pd.isna(x):
+        return False
+
+    filename = Path(str(x).strip()).name
+
+    match = re.search(r"_(\d+)\.[^.]+$", filename)
+
+    if match:
+        return match.group(1) == "1"
+
+    return False
+
+
+# =========================
+# 筛选首图
+# =========================
+first_img_df = df[df["LLM_image"].apply(is_first_image)].copy()
+
+
+# =========================
+# 输出
+# =========================
+Path(output_path).parent.mkdir(parents=True, exist_ok=True)
+
+first_img_df.to_excel(output_path, index=False)
+
+print("原始行数:", len(df))
+print("首图行数:", len(first_img_df))
+print("已输出:", output_path)
